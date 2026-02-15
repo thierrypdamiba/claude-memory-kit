@@ -71,19 +71,6 @@ export default function SignInPage() {
               boxShadow: "0 8px 24px rgba(0,0,0,0.06)",
             }}
           >
-            {/* Mode badge */}
-            <div className="flex justify-center mb-6">
-              <span
-                className="px-3 py-1 rounded-full text-[12px]"
-                style={{
-                  border: "1px solid var(--border)",
-                  color: "var(--muted)",
-                }}
-              >
-                Current mode: Local
-              </span>
-            </div>
-
             {/* Header */}
             <h2 className="text-[22px] font-semibold tracking-tight text-center mb-1" style={{ letterSpacing: "-0.01em" }}>
               Welcome back
@@ -200,6 +187,12 @@ export default function SignInPage() {
         }
         .clerk-auth .cl-main {
           align-items: center !important;
+          width: 100% !important;
+        }
+        .clerk-auth .cl-rootBox,
+        .clerk-auth .cl-signIn-root,
+        .clerk-auth .cl-signIn-start {
+          width: 100% !important;
         }
         .clerk-auth .cl-socialButtonsBlockButtonArrow {
           display: none !important;

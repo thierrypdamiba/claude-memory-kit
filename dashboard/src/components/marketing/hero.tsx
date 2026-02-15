@@ -13,23 +13,6 @@ const FEATURES = [
 export function Hero() {
   return (
     <section className="max-w-5xl mx-auto px-6 pt-28 pb-24">
-      {/* Badge */}
-      <div
-        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[12px] font-medium mb-8"
-        style={{
-          background: "var(--warm-paper)",
-          color: "var(--muted)",
-          border: "1px solid var(--border-light)",
-          animation: "drift-up 300ms ease both",
-        }}
-      >
-        <span
-          className="w-1.5 h-1.5 rounded-full"
-          style={{ background: "var(--gate-promissory)" }}
-        />
-        Now in public beta
-      </div>
-
       {/* Headline */}
       <h1
         className="text-[48px] md:text-[72px] font-normal tracking-tight leading-[1.0] mb-6"
