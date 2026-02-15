@@ -23,9 +23,9 @@ RUN pnpm build
 FROM base AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+RUN mkdir -p /app/public
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
-COPY --from=build /app/public ./public 2>/dev/null || true
 EXPOSE 7748
 ENV PORT=7748
 ENV HOSTNAME="0.0.0.0"
