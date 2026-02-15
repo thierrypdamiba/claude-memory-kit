@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="16"
+     height="16"
+     viewBox="0 0 16 16"
+     fill="none"
+     role="img"
+     aria-label="Claude Memory Kit logo">
+
+  <g stroke="#2F2B27"
+     stroke-width="1.75"
+     stroke-linecap="round"
+     stroke-linejoin="round">
+
+    <!-- memory gate -->
+    <path d="M6 3.75h4.25c1.25 0 2 .9 2 2v4.5c0 1.1-.75 2-2 2H6"/>
+
+    <!-- passage line -->
+    <path d="M3.75 8h5.75"/>
+
+    <!-- directional recall -->
+    <path d="M8.5 6.6 10.1 8 8.5 9.4"/>
+
+  </g>
+</svg>

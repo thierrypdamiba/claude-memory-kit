@@ -1,0 +1,46 @@
+[package]
+name = "claude-memory"
+version = "0.1.0"
+edition = "2021"
+description = "Persistent first-person memory for Claude Code sessions"
+
+[[bin]]
+name = "claude-memory"
+path = "src/main.rs"
+
+[dependencies]
+# MCP server
+rmcp = { version = "0.1", features = ["server", "transport-io", "macros"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# HTTP client (Anthropic API for extraction/consolidation)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# SQLite + FTS5
+rusqlite = { version = "0.32", features = ["bundled", "modern_sqlite"] }
+
+# Qdrant Cloud (vector search)
+qdrant-client = "1.12"
+
+# Neo4j Aura (graph)
+neo4rs = "0.8"
+
+# Embeddings (local ONNX)
+fastembed = "4"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenv = "0.15"
+walkdir = "2"
+regex = "1"

@@ -1,0 +1,8 @@
+dashboard/
+.git/
+.env
+.env.local
+.fastembed_cache/
+target/
+__pycache__/
+*.db

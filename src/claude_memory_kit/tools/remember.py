@@ -1,0 +1,117 @@
+import logging
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from ..store import Store
+from ..types import DecayClass, Gate, JournalEntry, Memory
+
+log = logging.getLogger("cmk")
+
+
+async def do_remember(
+    store: Store,
+    content: str,
+    gate_str: str,
+    person: str | None = None,
+    project: str | None = None,
+    user_id: str = "local",
+) -> str:
+    gate = Gate.from_str(gate_str)
+    if gate is None:
+        return (
+            f"invalid gate '{gate_str}'. "
+            "use: behavioral, relational, epistemic, promissory, correction"
+        )
+
+    now = datetime.now(timezone.utc)
+    mem_id = f"mem_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+
+    memory = Memory(
+        id=mem_id,
+        created=now,
+        gate=gate,
+        person=person,
+        project=project,
+        confidence=0.9,
+        last_accessed=now,
+        access_count=1,
+        decay_class=DecayClass.from_gate(gate),
+        content=content,
+    )
+
+    # 1. Journal entry
+    entry = JournalEntry(
+        timestamp=now,
+        gate=gate,
+        content=content,
+        person=person,
+        project=project,
+    )
+    store.db.insert_journal(entry, user_id=user_id)
+
+    # 2. Insert into SQLite
+    store.db.insert_memory(memory, user_id=user_id)
+
+    # 3. Vector store
+    try:
+        store.vectors.upsert(mem_id, content, person, project, user_id=user_id)
+    except Exception as e:
+        log.warning("vector upsert failed: %s", e)
+
+    # 4. Auto-link graph edges
+    store.db.auto_link(mem_id, person, project, user_id=user_id)
+
+    # 5. Contradiction check via vectors
+    warning = ""
+    try:
+        similar = store.vectors.search(content, limit=3, user_id=user_id)
+        for sid, score in similar:
+            if sid != mem_id and score > 0.85:
+                existing = store.db.get_memory(sid, user_id=user_id)
+                if existing and existing.content != content:
+                    warning = (
+                        f"\n\nwarning: high similarity (score={score:.2f}) "
+                        f"with existing memory [{sid}]. "
+                        "possible contradiction or duplicate."
+                    )
+                    break
+    except Exception as e:
+        log.warning("contradiction check failed: %s", e)
+
+    # 6. Correction gate: create CONTRADICTS edge, downgrade old
+    if gate == Gate.correction:
+        try:
+            similar = store.vectors.search(content, limit=1, user_id=user_id)
+            for sid, score in similar:
+                if sid != mem_id and score > 0.5:
+                    store.db.add_edge(
+                        mem_id, sid, "CONTRADICTS", user_id=user_id
+                    )
+                    old = store.db.get_memory(sid, user_id=user_id)
+                    if old:
+                        store.db.update_confidence(
+                            sid, old.confidence * 0.5, user_id=user_id
+                        )
+        except Exception as e:
+            log.warning("correction handling failed: %s", e)
+
+    # 7. Memory chains: FOLLOWS edge for same person+project within 24h
+    if person or project:
+        try:
+            cutoff = (now - timedelta(hours=24)).isoformat()
+            recent = store.db.conn.execute(
+                "SELECT id FROM memories "
+                "WHERE id != ? AND created > ? AND user_id = ? "
+                "AND (person = ? OR project = ?) "
+                "ORDER BY created DESC LIMIT 1",
+                (mem_id, cutoff, user_id, person or "", project or ""),
+            ).fetchone()
+            if recent:
+                store.db.add_edge(
+                    mem_id, recent[0], "FOLLOWS", user_id=user_id
+                )
+        except Exception as e:
+            log.warning("memory chain failed: %s", e)
+
+    preview = content[:80] if len(content) > 80 else content
+    return f"Remembered [{gate.value}]: {preview} (id: {mem_id}){warning}"

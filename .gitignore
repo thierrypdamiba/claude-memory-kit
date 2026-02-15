@@ -1,0 +1,14 @@
+/target
+__pycache__/
+*.pyc
+.env
+.env.local
+.fastembed_cache/
+node_modules/
+.next/
+dashboard/.next/
+dashboard/node_modules/
+*.db
+.claude-memory/
+dist/
+*.egg-info/
