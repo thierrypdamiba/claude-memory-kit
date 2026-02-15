@@ -2,7 +2,7 @@
 # Claude Code Stop hook
 # Auto-extracts memories from the session transcript via Haiku
 
-BINARY="${CLAUDE_MEMORY_BIN:-/Users/thierrydamiba/claude-memory/target/release/claude-memory}"
+BINARY="${CLAUDE_MEMORY_BIN:-claude-memory}"
 STORE="${MEMORY_STORE_PATH:-$HOME/.claude-memory/store}"
 
 export MEMORY_STORE_PATH="$STORE"

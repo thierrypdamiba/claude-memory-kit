@@ -75,7 +75,11 @@ impl MemoryServer {
         Ok(format!(
             "Remembered [{}]: {} (id: {})",
             gate.as_str(),
-            if content.len() > 80 { &content[..80] } else { content },
+            if content.len() > 80 {
+                &content[..content.floor_char_boundary(80)]
+            } else {
+                content
+            },
             id
         ))
     }

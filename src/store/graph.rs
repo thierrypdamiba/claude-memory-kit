@@ -65,9 +65,18 @@ impl GraphStore {
         to_id: &str,
         relation: &str,
     ) -> Result<()> {
+        // Sanitize relation type to prevent Cypher injection —
+        // only allow alphanumeric characters and underscores.
+        let safe_relation: String = relation
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if safe_relation.is_empty() {
+            anyhow::bail!("invalid relation type: '{}'", relation);
+        }
         let cypher = format!(
             "MATCH (a:Memory {{id: $from_id}}), (b:Memory {{id: $to_id}}) \
-             MERGE (a)-[r:{relation}]->(b) \
+             MERGE (a)-[r:{safe_relation}]->(b) \
              SET r.created = datetime()"
         );
         self.graph.run(
@@ -153,6 +162,10 @@ impl GraphStore {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() }
-    else { format!("{}...", &s[..max]) }
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let end = s.floor_char_boundary(max);
+        format!("{}...", &s[..end])
+    }
 }

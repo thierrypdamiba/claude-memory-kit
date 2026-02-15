@@ -1,13 +1,12 @@
 """FastAPI server for the dashboard."""
 
-import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..auth import get_current_user, is_auth_enabled, LOCAL_USER
 from ..auth_keys import create_api_key, list_keys, revoke_key
@@ -24,8 +23,8 @@ origins = os.getenv("CORS_ORIGINS", "http://localhost:5555,http://localhost:3000
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 _store: Store | None = None
@@ -47,21 +46,21 @@ async def _auth(request: Request) -> dict:
 
 
 class CreateMemoryRequest(BaseModel):
-    content: str
-    gate: str
-    person: str | None = None
-    project: str | None = None
+    content: str = Field(..., max_length=100_000)
+    gate: str = Field(..., max_length=50)
+    person: str | None = Field(None, max_length=500)
+    project: str | None = Field(None, max_length=500)
 
 
 class UpdateMemoryRequest(BaseModel):
-    content: str | None = None
-    gate: str | None = None
-    person: str | None = None
-    project: str | None = None
+    content: str | None = Field(None, max_length=100_000)
+    gate: str | None = Field(None, max_length=50)
+    person: str | None = Field(None, max_length=500)
+    project: str | None = Field(None, max_length=500)
 
 
 class SearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., max_length=10_000)
 
 
 class CreateKeyRequest(BaseModel):
@@ -73,9 +72,9 @@ class UpdateIdentityRequest(BaseModel):
 
 
 class CreateRuleRequest(BaseModel):
-    scope: str = "global"
-    condition: str
-    enforcement: str = "suggest"
+    scope: str = Field("global", max_length=100)
+    condition: str = Field(..., max_length=10_000)
+    enforcement: str = Field("suggest", max_length=50)
 
 
 class UpdateRuleRequest(BaseModel):
@@ -181,7 +180,11 @@ async def update_memory(
     if "content" in updates:
         updated_mem = store.db.get_memory(id, user_id=user["id"])
         if updated_mem:
-            store.vectors.upsert(updated_mem)
+            store.vectors.upsert(
+                updated_mem.id, updated_mem.content,
+                updated_mem.person, updated_mem.project,
+                user_id=user["id"],
+            )
 
     return {"result": "updated"}
 

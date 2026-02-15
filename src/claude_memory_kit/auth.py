@@ -28,7 +28,14 @@ def _get_clerk_config() -> dict:
 
 def is_auth_enabled() -> bool:
     cfg = _get_clerk_config()
-    return bool(cfg["secret_key"] and not cfg["secret_key"].startswith("<"))
+    has_secret = bool(cfg["secret_key"] and not cfg["secret_key"].startswith("<"))
+    if has_secret and not _get_jwks_url():
+        log.warning(
+            "CLERK_SECRET_KEY is set but no JWKS URL can be derived. "
+            "Set CLERK_FRONTEND_API or CLERK_INSTANCE_ID. Auth disabled."
+        )
+        return False
+    return has_secret
 
 
 def _get_jwks_url() -> str:
@@ -82,7 +89,12 @@ def verify_clerk_token(token: str) -> dict | None:
             token,
             signing_key.key,
             algorithms=["RS256"],
-            options={"verify_aud": False},
+            options={
+                "verify_aud": bool(os.getenv("CLERK_JWT_AUDIENCE")),
+                "verify_iss": bool(os.getenv("CLERK_JWT_ISSUER")),
+            },
+            audience=os.getenv("CLERK_JWT_AUDIENCE") or None,
+            issuer=os.getenv("CLERK_JWT_ISSUER") or None,
         )
         return {
             "id": claims.get("sub", ""),

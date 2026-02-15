@@ -142,6 +142,7 @@ class SqliteStore:
             ("journal", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
             ("edges", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
             ("archive", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
+            ("memories", "pinned", "INTEGER DEFAULT 0"),
         ]
         for table, col, typedef in migrations:
             try:
@@ -174,6 +175,15 @@ class SqliteStore:
                 ) VALUES (
                     'delete', old.rowid, old.content, old.person, old.project
                 );
+            END;
+            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(
+                    memories_fts, rowid, content, person, project
+                ) VALUES (
+                    'delete', old.rowid, old.content, old.person, old.project
+                );
+                INSERT INTO memories_fts(rowid, content, person, project)
+                VALUES (new.rowid, new.content, new.person, new.project);
             END;
         """)
 
@@ -287,13 +297,7 @@ class SqliteStore:
     def set_pinned(
         self, id: str, pinned: bool, user_id: str = "local"
     ) -> None:
-        """Set the pinned flag on a memory. Adds column if missing."""
-        try:
-            self.conn.execute(
-                "ALTER TABLE memories ADD COLUMN pinned INTEGER DEFAULT 0"
-            )
-        except Exception:
-            pass
+        """Set the pinned flag on a memory."""
         self.conn.execute(
             "UPDATE memories SET pinned = ? WHERE id = ? AND user_id = ?",
             (1 if pinned else 0, id, user_id),
@@ -693,7 +697,7 @@ class SqliteStore:
     def count_user_data(self, user_id: str) -> dict:
         """Count all data owned by a user_id across tables."""
         counts = {}
-        for table in ("memories", "journal", "edges", "archive"):
+        for table in ("memories", "journal", "edges", "archive", "rules"):
             row = self.conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE user_id = ?",
                 (user_id,),
@@ -713,7 +717,7 @@ class SqliteStore:
     def migrate_user_data(self, from_id: str, to_id: str) -> dict:
         """Move all data from one user_id to another. Returns counts of migrated rows."""
         counts = {}
-        for table in ("memories", "journal", "edges", "archive"):
+        for table in ("memories", "journal", "edges", "archive", "rules"):
             cur = self.conn.execute(
                 f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
                 (to_id, from_id),
@@ -759,6 +763,8 @@ class SqliteStore:
     # ---- Helpers ----
 
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
+        keys = row.keys() if hasattr(row, "keys") else []
+        pinned = bool(row["pinned"]) if "pinned" in keys else False
         return Memory(
             id=row["id"],
             created=datetime.fromisoformat(row["created"]),
@@ -770,4 +776,5 @@ class SqliteStore:
             access_count=row["access_count"],
             decay_class=DecayClass(row["decay_class"]),
             content=row["content"],
+            pinned=pinned,
         )
