@@ -12,3 +12,4 @@ dashboard/node_modules/
 .claude-memory/
 dist/
 *.egg-info/
+.vercel
