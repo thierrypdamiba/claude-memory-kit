@@ -82,6 +82,7 @@ export default function SignInPage() {
             {/* Clerk sign-in */}
             <div className="clerk-auth">
               <SignIn
+                forceRedirectUrl="/dashboard"
                 appearance={{
                   elements: {
                     rootBox: "w-full",

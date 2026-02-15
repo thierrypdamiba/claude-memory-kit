@@ -126,7 +126,7 @@ export function Hero() {
             Created memory store at ~/.claude-memory/store
           </div>
           <div style={{ color: "rgba(255,255,255,0.45)" }}>
-            MCP server configured.
+            MCP server configured. Restart Claude to activate.
           </div>
           <div className="mt-3">
             <span style={{ color: "#22c55e" }}>$</span>{" "}
@@ -138,16 +138,10 @@ export function Hero() {
           </div>
           <div className="mt-1">
             <span style={{ color: "#a78bfa" }}>claude:</span>{" "}
-            Noted. I&apos;ll remember both preferences.{" "}
-            <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]"
-              style={{ background: "rgba(5, 150, 105, 0.15)", color: "#34d399" }}
-            >
-              2 memories saved
-            </span>
+            Got it. I&apos;ll use tabs for indentation and target Render for deployments going forward.
           </div>
           <div className="mt-3" style={{ color: "rgba(255,255,255,0.25)" }}>
-            ── next day ──
+            ── next session ──
           </div>
           <div className="mt-1">
             <span style={{ color: "#60a5fa" }}>you:</span>{" "}
@@ -155,13 +149,7 @@ export function Hero() {
           </div>
           <div className="mt-1">
             <span style={{ color: "#a78bfa" }}>claude:</span>{" "}
-            Done. Used tabs for indentation, added render.yaml for deployment.{" "}
-            <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px]"
-              style={{ background: "rgba(5, 150, 105, 0.15)", color: "#34d399" }}
-            >
-              recalled
-            </span>
+            Done. Used tabs for indentation and added render.yaml for deployment.
           </div>
         </div>
       </div>
