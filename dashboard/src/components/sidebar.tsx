@@ -12,6 +12,7 @@ const MEMORY_NAV = [
 ];
 
 const MANAGE_NAV = [
+  { href: "/dashboard/private", label: "Private", icon: "\u26A0" },
   { href: "/dashboard/rules", label: "Rules", icon: "\u2630" },
   { href: "/dashboard/keys", label: "Keys", icon: "\u26BF" },
   { href: "/dashboard/settings", label: "Settings", icon: "\u2699" },

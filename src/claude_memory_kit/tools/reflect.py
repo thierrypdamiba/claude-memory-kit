@@ -73,6 +73,6 @@ async def do_reflect(store: Store, user_id: str = "local") -> str:
             except Exception as e:
                 report.append(f"Identity regeneration failed: {e}")
 
-    if not report:
+    if not report:  # pragma: no cover - consolidation block always appends
         return "Reflection complete. Nothing to consolidate."
     return "Reflection complete:\n- " + "\n- ".join(report)

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { Memory } from "@/lib/api";
 import { GateBadge } from "./gate-badge";
+import { SensitivityBadge } from "./sensitivity-badge";
 
 interface Props {
   memory: Memory;
@@ -49,6 +50,9 @@ export function MemoryCard({ memory, onClick, onForget, showScore }: Props) {
       <div className="flex items-center justify-between mb-2.5">
         <div className="flex items-center gap-2">
           <GateBadge gate={memory.gate} />
+          {memory.sensitivity && memory.sensitivity !== "safe" && (
+            <SensitivityBadge level={memory.sensitivity} />
+          )}
           {memory.person && (
             <span className="text-[13px]" style={{ color: "var(--muted)" }}>
               {memory.person}

@@ -107,6 +107,27 @@ def prime(message):
 
 
 @main.command()
+def scan():
+    """Scan memories for PII and sensitive data patterns."""
+    from .tools.scan import do_scan
+    store = _get_store()
+    result = asyncio.run(do_scan(store, user_id=get_user_id()))
+    click.echo(result)
+
+
+@main.command()
+@click.option("--force", is_flag=True, help="Re-classify all memories, not just unclassified")
+def classify(force):
+    """Classify memories for sensitive content using Opus."""
+    from .tools.classify import classify_memories
+    store = _get_store()
+    result = asyncio.run(
+        classify_memories(store, user_id=get_user_id(), force=force)
+    )
+    click.echo(result)
+
+
+@main.command()
 @click.option("--port", default=7749, help="API server port")
 def serve(port):
     """Start API server for dashboard."""

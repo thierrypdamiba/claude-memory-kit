@@ -132,7 +132,28 @@ class SqliteStore:
             CREATE INDEX IF NOT EXISTS idx_archive_user
                 ON archive(user_id);
         """)
+        # Composite indexes for common query patterns
+        self.conn.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_memories_user_gate_created
+                ON memories(user_id, gate, created DESC);
+            CREATE INDEX IF NOT EXISTS idx_memories_user_person
+                ON memories(user_id, person);
+            CREATE INDEX IF NOT EXISTS idx_memories_user_project
+                ON memories(user_id, project);
+
+            CREATE INDEX IF NOT EXISTS idx_journal_user_date
+                ON journal(user_id, date, timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_edges_user_from
+                ON edges(user_id, from_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_user_to
+                ON edges(user_id, to_id);
+
+            CREATE INDEX IF NOT EXISTS idx_memories_user_sensitivity
+                ON memories(user_id, sensitivity);
+        """)
         self._ensure_fts()
+        self._ensure_fts_update_trigger()
         self.conn.commit()
 
     def _migrate_add_columns(self) -> None:
@@ -142,6 +163,8 @@ class SqliteStore:
             ("journal", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
             ("edges", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
             ("archive", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
+            ("memories", "sensitivity", "TEXT"),
+            ("memories", "sensitivity_reason", "TEXT"),
         ]
         for table, col, typedef in migrations:
             try:
@@ -174,6 +197,42 @@ class SqliteStore:
                 ) VALUES (
                     'delete', old.rowid, old.content, old.person, old.project
                 );
+            END;
+            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(
+                    memories_fts, rowid, content, person, project
+                ) VALUES (
+                    'delete', old.rowid, old.content, old.person, old.project
+                );
+                INSERT INTO memories_fts(rowid, content, person, project)
+                VALUES (new.rowid, new.content, new.person, new.project);
+            END;
+        """)
+
+    def _ensure_fts_update_trigger(self) -> None:
+        """Add AFTER UPDATE trigger for existing databases that only have INSERT/DELETE triggers."""
+        row = self.conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='trigger' AND name='memories_au'"
+        ).fetchone()
+        if row:
+            return
+        # Only create if FTS table exists
+        fts = self.conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='memories_fts'"
+        ).fetchone()
+        if not fts:
+            return
+        self.conn.executescript("""
+            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                INSERT INTO memories_fts(
+                    memories_fts, rowid, content, person, project
+                ) VALUES (
+                    'delete', old.rowid, old.content, old.person, old.project
+                );
+                INSERT INTO memories_fts(rowid, content, person, project)
+                VALUES (new.rowid, new.content, new.person, new.project);
             END;
         """)
 
@@ -314,6 +373,59 @@ class SqliteStore:
         ).fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def update_sensitivity(
+        self, id: str, sensitivity: str, reason: str,
+        user_id: str = "local",
+    ) -> None:
+        """Set sensitivity classification on a memory."""
+        self.conn.execute(
+            "UPDATE memories SET sensitivity = ?, sensitivity_reason = ? "
+            "WHERE id = ? AND user_id = ?",
+            (sensitivity, reason, id, user_id),
+        )
+        self.conn.commit()
+
+    def list_memories_by_sensitivity(
+        self, sensitivity: str | None, limit: int = 50,
+        offset: int = 0, user_id: str = "local",
+    ) -> list[Memory]:
+        """List memories filtered by sensitivity. None = unclassified."""
+        if sensitivity == "unclassified" or sensitivity is None:
+            rows = self.conn.execute(
+                "SELECT * FROM memories "
+                "WHERE user_id = ? AND sensitivity IS NULL "
+                "ORDER BY created DESC LIMIT ? OFFSET ?",
+                (user_id, limit, offset),
+            ).fetchall()
+        elif sensitivity == "flagged":
+            rows = self.conn.execute(
+                "SELECT * FROM memories "
+                "WHERE user_id = ? AND sensitivity IN ('sensitive', 'critical') "
+                "ORDER BY created DESC LIMIT ? OFFSET ?",
+                (user_id, limit, offset),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM memories "
+                "WHERE user_id = ? AND sensitivity = ? "
+                "ORDER BY created DESC LIMIT ? OFFSET ?",
+                (user_id, sensitivity, limit, offset),
+            ).fetchall()
+        return [self._row_to_memory(r) for r in rows]
+
+    def count_by_sensitivity(self, user_id: str = "local") -> dict[str, int]:
+        """Count memories grouped by sensitivity level."""
+        rows = self.conn.execute(
+            "SELECT sensitivity, COUNT(*) FROM memories "
+            "WHERE user_id = ? GROUP BY sensitivity",
+            (user_id,),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for r in rows:
+            key = r[0] if r[0] else "unclassified"
+            counts[key] = r[1]
+        return counts
+
     def update_confidence(
         self, id: str, confidence: float, user_id: str = "local"
     ) -> None:
@@ -388,6 +500,18 @@ class SqliteStore:
             (date, user_id),
         )
         self.conn.commit()
+
+    def latest_checkpoint(self, user_id: str = "local") -> dict | None:
+        """Get the most recent checkpoint journal entry."""
+        row = self.conn.execute(
+            "SELECT * FROM journal "
+            "WHERE gate = 'checkpoint' AND user_id = ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
 
     # ---- Identity ----
 
@@ -693,7 +817,7 @@ class SqliteStore:
     def count_user_data(self, user_id: str) -> dict:
         """Count all data owned by a user_id across tables."""
         counts = {}
-        for table in ("memories", "journal", "edges", "archive"):
+        for table in ("memories", "journal", "edges", "archive", "rules"):
             row = self.conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE user_id = ?",
                 (user_id,),
@@ -713,7 +837,7 @@ class SqliteStore:
     def migrate_user_data(self, from_id: str, to_id: str) -> dict:
         """Move all data from one user_id to another. Returns counts of migrated rows."""
         counts = {}
-        for table in ("memories", "journal", "edges", "archive"):
+        for table in ("memories", "journal", "edges", "archive", "rules"):
             cur = self.conn.execute(
                 f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
                 (to_id, from_id),
@@ -759,6 +883,7 @@ class SqliteStore:
     # ---- Helpers ----
 
     def _row_to_memory(self, row: sqlite3.Row) -> Memory:
+        keys = row.keys()
         return Memory(
             id=row["id"],
             created=datetime.fromisoformat(row["created"]),
@@ -770,4 +895,7 @@ class SqliteStore:
             access_count=row["access_count"],
             decay_class=DecayClass(row["decay_class"]),
             content=row["content"],
+            pinned=bool(row["pinned"]) if "pinned" in keys else False,
+            sensitivity=row["sensitivity"] if "sensitivity" in keys else None,
+            sensitivity_reason=row["sensitivity_reason"] if "sensitivity_reason" in keys else None,
         )

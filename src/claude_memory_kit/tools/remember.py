@@ -1,4 +1,5 @@
 import logging
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -6,6 +7,30 @@ from ..store import Store
 from ..types import DecayClass, Gate, JournalEntry, Memory
 
 log = logging.getLogger("cmk")
+
+# Patterns that suggest sensitive data
+_PII_PATTERNS = [
+    (re.compile(r"sk-[a-zA-Z0-9]{20,}"), "API key (sk-...)"),
+    (re.compile(r"sk_(?:live|test)_[a-zA-Z0-9]{20,}"), "Stripe key"),
+    (re.compile(r"pk_(?:live|test)_[a-zA-Z0-9]{20,}"), "Stripe publishable key"),
+    (re.compile(r"cmk-sk-[a-zA-Z0-9]+"), "CMK secret key"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "AWS access key"),
+    (re.compile(r"ghp_[a-zA-Z0-9]{36}"), "GitHub personal access token"),
+    (re.compile(r"gho_[a-zA-Z0-9]{36}"), "GitHub OAuth token"),
+    (re.compile(r"xox[baprs]-[a-zA-Z0-9\-]+"), "Slack token"),
+    (re.compile(r"eyJ[a-zA-Z0-9_-]{20,}\.eyJ[a-zA-Z0-9_-]{20,}"), "JWT token"),
+    (re.compile(r"(?:password|passwd|pwd)\s*[:=]\s*\S+", re.IGNORECASE), "password"),
+    (re.compile(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b"), "credit card number"),
+    (re.compile(r"\b\d{3}-\d{2}-\d{4}\b"), "SSN"),
+]
+
+
+def _check_pii(content: str) -> str | None:
+    """Check content for common PII patterns. Returns warning string or None."""
+    for pattern, label in _PII_PATTERNS:
+        if pattern.search(content):
+            return f"This memory appears to contain a {label}. Consider removing sensitive data."
+    return None
 
 
 async def do_remember(
@@ -112,6 +137,27 @@ async def do_remember(
                 )
         except Exception as e:
             log.warning("memory chain failed: %s", e)
+
+    # 8. PII detection
+    pii_warning = _check_pii(content)
+    if pii_warning:
+        warning += f"\n\nWARNING: {pii_warning}"
+
+    # 9. Opus sensitivity classification
+    try:
+        from ..config import get_api_key
+        api_key = get_api_key()
+        if api_key:
+            from .classify import classify_single
+            classification = await classify_single(store, mem_id, user_id)
+            level = classification.get("level", "unknown")
+            if level not in ("safe", "unknown"):
+                warning += (
+                    f"\n\nSENSITIVITY: {level} "
+                    f"({classification.get('reason', '')})"
+                )
+    except Exception as e:
+        log.warning("sensitivity classification failed: %s", e)
 
     preview = content[:80] if len(content) > 80 else content
     return f"Remembered [{gate.value}]: {preview} (id: {mem_id}){warning}"

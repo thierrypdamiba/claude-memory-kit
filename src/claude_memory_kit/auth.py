@@ -28,7 +28,15 @@ def _get_clerk_config() -> dict:
 
 def is_auth_enabled() -> bool:
     cfg = _get_clerk_config()
-    return bool(cfg["secret_key"] and not cfg["secret_key"].startswith("<"))
+    if not cfg["secret_key"] or cfg["secret_key"].startswith("<"):
+        return False
+    jwks_url = _get_jwks_url()
+    if not jwks_url:
+        log.warning(
+            "CLERK_SECRET_KEY set but CLERK_FRONTEND_API/CLERK_INSTANCE_ID missing. Auth disabled."
+        )
+        return False
+    return True
 
 
 def _get_jwks_url() -> str:

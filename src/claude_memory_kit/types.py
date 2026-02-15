@@ -55,6 +55,9 @@ class Memory(BaseModel):
     access_count: int = 1
     decay_class: DecayClass
     content: str
+    pinned: bool = False
+    sensitivity: str | None = None
+    sensitivity_reason: str | None = None
 
 
 class JournalEntry(BaseModel):

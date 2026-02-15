@@ -1,13 +1,15 @@
 """FastAPI server for the dashboard."""
 
 import asyncio
+import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..auth import get_current_user, is_auth_enabled, LOCAL_USER
 from ..auth_keys import create_api_key, list_keys, revoke_key
@@ -16,17 +18,55 @@ from ..store import Store
 from ..types import IdentityCard
 from ..tools import (
     do_remember, do_recall, do_reflect,
-    do_identity, do_forget, do_prime,
+    do_identity, do_forget, do_prime, do_scan,
+    classify_memories, reclassify_memory,
 )
 
-app = FastAPI(title="claude-memory-kit")
+log = logging.getLogger("cmk")
+
+GATE_PATTERN = r"^(behavioral|relational|epistemic|promissory|correction)$"
+ENFORCEMENT_PATTERN = r"^(suggest|enforce|block)$"
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    mode = "cloud" if is_cloud_mode() else "local"
+    log.info("cmk starting in %s mode", mode)
+
+    # Warn about partial auth config
+    sk = os.getenv("CLERK_SECRET_KEY", "")
+    has_sk = bool(sk and not sk.startswith("<"))
+    has_frontend = bool(os.getenv("CLERK_FRONTEND_API") or os.getenv("CLERK_INSTANCE_ID"))
+    if has_sk and not has_frontend:
+        log.warning(
+            "CLERK_SECRET_KEY is set but CLERK_FRONTEND_API/CLERK_INSTANCE_ID is missing. "
+            "Auth will be disabled. Set one of these to enable auth."
+        )
+    elif has_sk and has_frontend:
+        log.info("clerk auth enabled")
+    else:
+        log.info("running without auth (local mode)")
+
+    yield
+
+
+app = FastAPI(title="claude-memory-kit", lifespan=lifespan)
 origins = os.getenv("CORS_ORIGINS", "http://localhost:5555,http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
+
 
 _store: Store | None = None
 
@@ -47,41 +87,54 @@ async def _auth(request: Request) -> dict:
 
 
 class CreateMemoryRequest(BaseModel):
-    content: str
-    gate: str
-    person: str | None = None
-    project: str | None = None
+    content: str = Field(..., max_length=100_000)
+    gate: str = Field(..., pattern=GATE_PATTERN)
+    person: str | None = Field(None, max_length=500)
+    project: str | None = Field(None, max_length=500)
 
 
 class UpdateMemoryRequest(BaseModel):
-    content: str | None = None
-    gate: str | None = None
-    person: str | None = None
-    project: str | None = None
+    content: str | None = Field(None, max_length=100_000)
+    gate: str | None = Field(None, pattern=GATE_PATTERN)
+    person: str | None = Field(None, max_length=500)
+    project: str | None = Field(None, max_length=500)
 
 
 class SearchRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=10_000)
 
 
 class CreateKeyRequest(BaseModel):
-    name: str = ""
+    name: str = Field("", max_length=200)
 
 
 class UpdateIdentityRequest(BaseModel):
-    content: str
+    content: str = Field(..., max_length=50_000)
 
 
 class CreateRuleRequest(BaseModel):
-    scope: str = "global"
-    condition: str
-    enforcement: str = "suggest"
+    scope: str = Field("global", max_length=100)
+    condition: str = Field(..., max_length=10_000)
+    enforcement: str = Field("suggest", pattern=ENFORCEMENT_PATTERN)
 
 
 class UpdateRuleRequest(BaseModel):
-    scope: str | None = None
-    condition: str | None = None
-    enforcement: str | None = None
+    scope: str | None = Field(None, max_length=100)
+    condition: str | None = Field(None, max_length=10_000)
+    enforcement: str | None = Field(None, pattern=ENFORCEMENT_PATTERN)
+
+
+SENSITIVITY_PATTERN = r"^(safe|sensitive|critical)$"
+
+
+class ReclassifyRequest(BaseModel):
+    level: str = Field(..., pattern=SENSITIVITY_PATTERN)
+
+
+class BulkPrivateRequest(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=100)
+    action: str = Field(..., pattern=r"^(delete|redact|reclassify)$")
+    level: str | None = Field(None, pattern=SENSITIVITY_PATTERN)
 
 
 # ---- Public ----
@@ -133,6 +186,8 @@ async def list_memories(
     project: str | None = None,
     user: dict = Depends(_auth),
 ):
+    limit = min(max(1, limit), 500)
+    offset = max(0, offset)
     store = _get_store()
     memories = store.db.list_memories(
         limit, offset, user_id=user["id"],
@@ -181,7 +236,13 @@ async def update_memory(
     if "content" in updates:
         updated_mem = store.db.get_memory(id, user_id=user["id"])
         if updated_mem:
-            store.vectors.upsert(updated_mem)
+            store.vectors.upsert(
+                updated_mem.id,
+                updated_mem.content,
+                updated_mem.person,
+                updated_mem.project,
+                user_id=user["id"],
+            )
 
     return {"result": "updated"}
 
@@ -268,6 +329,107 @@ async def trigger_reflect(user: dict = Depends(_auth)):
     store = _get_store()
     result = await do_reflect(store, user_id=user["id"])
     return {"result": result}
+
+
+@app.get("/api/scan")
+async def scan_memories(user: dict = Depends(_auth)):
+    """Scan memories for PII and sensitive data patterns."""
+    store = _get_store()
+    result = await do_scan(store, user_id=user["id"])
+    return {"result": result}
+
+
+# ---- Privacy / Sensitivity ----
+
+@app.get("/api/private")
+async def list_private(
+    level: str = "flagged",
+    limit: int = 50, offset: int = 0,
+    user: dict = Depends(_auth),
+):
+    """List memories filtered by sensitivity level."""
+    limit = min(max(1, limit), 500)
+    offset = max(0, offset)
+    store = _get_store()
+    memories = store.db.list_memories_by_sensitivity(
+        level if level != "flagged" else "flagged",
+        limit, offset, user_id=user["id"],
+    )
+    return {"memories": [m.model_dump() for m in memories]}
+
+
+@app.get("/api/privacy-stats")
+async def privacy_stats(user: dict = Depends(_auth)):
+    """Get sensitivity classification counts."""
+    store = _get_store()
+    counts = store.db.count_by_sensitivity(user_id=user["id"])
+    total = store.db.count_memories(user_id=user["id"])
+    return {
+        "total": total,
+        "safe": counts.get("safe", 0),
+        "sensitive": counts.get("sensitive", 0),
+        "critical": counts.get("critical", 0),
+        "unclassified": counts.get("unclassified", 0),
+    }
+
+
+@app.post("/api/classify")
+async def trigger_classify(user: dict = Depends(_auth)):
+    """Batch-classify all unclassified memories."""
+    store = _get_store()
+    result = await classify_memories(store, user_id=user["id"])
+    return {"result": result}
+
+
+@app.patch("/api/memories/{id}/sensitivity")
+async def update_sensitivity(
+    id: str, req: ReclassifyRequest, user: dict = Depends(_auth)
+):
+    """Manually reclassify a memory's sensitivity."""
+    store = _get_store()
+    result = await reclassify_memory(store, id, req.level, user_id=user["id"])
+    return {"result": result}
+
+
+@app.post("/api/private/bulk")
+async def bulk_private_action(
+    req: BulkPrivateRequest, user: dict = Depends(_auth)
+):
+    """Bulk actions on private memories: delete, redact, or reclassify."""
+    store = _get_store()
+    uid = user["id"]
+    processed = 0
+
+    for mem_id in req.ids:
+        mem = store.db.get_memory(mem_id, user_id=uid)
+        if not mem:
+            continue
+
+        if req.action == "delete":
+            await do_forget(store, mem_id, "bulk privacy action", user_id=uid)
+            processed += 1
+
+        elif req.action == "redact":
+            store.db.update_memory(mem_id, user_id=uid, content="[REDACTED]")
+            try:
+                store.vectors.upsert(
+                    mem_id, "[REDACTED]", mem.person, mem.project,
+                    user_id=uid,
+                )
+            except Exception:
+                pass
+            store.db.update_sensitivity(
+                mem_id, "safe", "content redacted by user", user_id=uid,
+            )
+            processed += 1
+
+        elif req.action == "reclassify" and req.level:
+            store.db.update_sensitivity(
+                mem_id, req.level, "bulk reclassified by user", user_id=uid,
+            )
+            processed += 1
+
+    return {"result": f"{req.action}: {processed}/{len(req.ids)} memories processed"}
 
 
 @app.get("/api/stats")

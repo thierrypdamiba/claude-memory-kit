@@ -17,6 +17,16 @@ export interface Memory {
   access_count: number;
   decay_class: string;
   content: string;
+  sensitivity: string | null;
+  sensitivity_reason: string | null;
+}
+
+export interface PrivacyStats {
+  total: number;
+  safe: number;
+  sensitive: number;
+  critical: number;
+  unclassified: number;
 }
 
 export interface Stats {
@@ -157,6 +167,18 @@ export const api = {
 
   // Setup
   getInitKey: () => post<SetupInfo>("/api/setup/init-key", {}),
+
+  // Privacy / Sensitivity
+  privateMemories: (level: string, limit = 50, offset = 0) =>
+    get<{ memories: Memory[] }>(`/api/private?level=${level}&limit=${limit}&offset=${offset}`),
+  privacyStats: () =>
+    get<PrivacyStats>("/api/privacy-stats"),
+  classify: () =>
+    post<{ result: string }>("/api/classify", {}),
+  reclassify: (id: string, level: string) =>
+    patch<{ result: string }>(`/api/memories/${id}/sensitivity`, { level }),
+  bulkPrivateAction: (ids: string[], action: string, level?: string) =>
+    post<{ result: string }>("/api/private/bulk", { ids, action, level }),
 
   // Data migration
   checkLocalData: () =>

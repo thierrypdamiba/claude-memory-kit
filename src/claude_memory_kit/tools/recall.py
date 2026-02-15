@@ -12,24 +12,10 @@ async def do_recall(
     results = []
     seen_ids: set[str] = set()
 
-    # 1. FTS search (sync, run in thread)
-    fts_results = await asyncio.to_thread(
-        store.db.search_fts, query, 5, user_id
-    )
-    for mem in fts_results:
-        if mem.id not in seen_ids:
-            seen_ids.add(mem.id)
-            store.db.touch_memory(mem.id, user_id=user_id)
-            person = mem.person or "?"
-            results.append(
-                f"[{mem.gate.value}] ({mem.created:%Y-%m-%d}, {person}) "
-                f"{mem.content}\n  id: {mem.id}"
-            )
-
-    # 2. Vector search (sync, run in thread)
+    # 1. Hybrid search (dense + sparse with RRF fusion) via Qdrant
     try:
         vec_results = await asyncio.to_thread(
-            store.vectors.search, query, 5, user_id
+            store.vectors.search, query, 10, user_id
         )
         for mem_id, score in vec_results:
             if mem_id not in seen_ids:
@@ -39,16 +25,52 @@ async def do_recall(
                     store.db.touch_memory(mem_id, user_id=user_id)
                     person = full.person or "?"
                     results.append(
-                        f"[{full.gate.value}, vector={score:.2f}] "
+                        f"[{full.gate.value}, score={score:.2f}] "
                         f"({full.created:%Y-%m-%d}, {person}) "
                         f"{full.content}\n  id: {full.id}"
                     )
-                else:
-                    results.append(
-                        f"[vector match, score={score:.2f}] id: {mem_id}"
-                    )
     except Exception as e:
-        log.warning("vector search failed: %s", e)
+        log.warning("hybrid search failed: %s", e)
+
+    # 2. Keyword fallback when hybrid returned nothing
+    #    Cloud: Qdrant text index (payload indexes work, scales horizontally)
+    #    Local: SQLite FTS5 (always available, no payload index support)
+    if not results:
+        if store.vectors._cloud and not store.vectors._disabled:
+            try:
+                text_results = await asyncio.to_thread(
+                    store.vectors.search_text, query, 5, user_id
+                )
+                for mem_id, score in text_results:
+                    if mem_id not in seen_ids:
+                        seen_ids.add(mem_id)
+                        full = store.db.get_memory(mem_id, user_id=user_id)
+                        if full:
+                            store.db.touch_memory(mem_id, user_id=user_id)
+                            person = full.person or "?"
+                            results.append(
+                                f"[{full.gate.value}, text] "
+                                f"({full.created:%Y-%m-%d}, {person}) "
+                                f"{full.content}\n  id: {full.id}"
+                            )
+            except Exception as e:
+                log.warning("qdrant text search failed: %s", e)
+        else:
+            try:
+                fts_results = await asyncio.to_thread(
+                    store.db.search_fts, query, 5, user_id
+                )
+                for mem in fts_results:
+                    if mem.id not in seen_ids:
+                        seen_ids.add(mem.id)
+                        store.db.touch_memory(mem.id, user_id=user_id)
+                        person = mem.person or "?"
+                        results.append(
+                            f"[{mem.gate.value}] ({mem.created:%Y-%m-%d}, {person}) "
+                            f"{mem.content}\n  id: {mem.id}"
+                        )
+            except Exception as e:
+                log.warning("FTS fallback failed: %s", e)
 
     # 3. Graph traversal for sparse results
     if len(results) < 3:

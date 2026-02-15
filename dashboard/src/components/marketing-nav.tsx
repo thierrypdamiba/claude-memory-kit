@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
 
 const NAV_LINKS = [
   { href: "/product", label: "Product" },
@@ -9,6 +10,81 @@ const NAV_LINKS = [
   { href: "/docs", label: "Docs" },
   { href: "/dashboard", label: "Dashboard" },
 ];
+
+function AuthButton() {
+  const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  if (!hasClerk) {
+    return (
+      <Link
+        href="/sign-in"
+        className="px-3.5 py-1.5 rounded-[var(--radius)] text-[14px] font-medium"
+        style={{
+          border: "1px solid var(--border)",
+          color: "var(--foreground)",
+          background: "transparent",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--surface-hover)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "transparent";
+        }}
+      >
+        Sign in
+      </Link>
+    );
+  }
+
+  return <ClerkAuthButton />;
+}
+
+function ClerkAuthButton() {
+  const { isSignedIn, isLoaded } = useAuth();
+
+  if (!isLoaded) return null;
+
+  if (isSignedIn) {
+    return (
+      <Link
+        href="/dashboard"
+        className="px-3.5 py-1.5 rounded-[var(--radius)] text-[14px] font-medium"
+        style={{
+          background: "var(--foreground)",
+          color: "var(--background)",
+          transition: "opacity 140ms ease",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.opacity = "0.85";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.opacity = "1";
+        }}
+      >
+        Dashboard
+      </Link>
+    );
+  }
+
+  return (
+    <Link
+      href="/sign-in"
+      className="px-3.5 py-1.5 rounded-[var(--radius)] text-[14px] font-medium"
+      style={{
+        border: "1px solid var(--border)",
+        color: "var(--foreground)",
+        background: "transparent",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "var(--surface-hover)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "transparent";
+      }}
+    >
+      Sign in
+    </Link>
+  );
+}
 
 export function MarketingNav() {
   const pathname = usePathname();
@@ -23,7 +99,7 @@ export function MarketingNav() {
       }}
     >
       <div className="w-full max-w-6xl mx-auto flex items-center justify-between">
-        {/* Logo + Sign up */}
+        {/* Logo + auth */}
         <div className="flex items-center gap-3">
           <Link href="/" className="flex items-center gap-2">
             <svg
@@ -52,23 +128,7 @@ export function MarketingNav() {
               Claude Memory Kit (CMK)
             </span>
           </Link>
-          <Link
-            href="/sign-in"
-            className="px-3.5 py-1.5 rounded-[var(--radius)] text-[14px] font-medium"
-            style={{
-              border: "1px solid var(--border)",
-              color: "var(--foreground)",
-              background: "transparent",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = "var(--surface-hover)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-            }}
-          >
-            Sign in
-          </Link>
+          <AuthButton />
         </div>
 
         {/* Center nav */}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 
 const FEATURES = [
@@ -9,8 +9,54 @@ const FEATURES = [
   { label: "MCP native", detail: "works with any MCP-compatible client" },
 ];
 
+// Each scene is a sequence of lines that type out
+const SCENES = [
+  {
+    label: "session 1",
+    lines: [
+      { speaker: "you", text: "We're building a Rust API for the chess engine. Target is sub-10ms per move." },
+      { speaker: "claude", text: 'Got it. I\'ll keep latency as the primary constraint.' },
+      { speaker: "system", text: "saved [epistemic] Rust API for chess engine, sub-10ms target" },
+      { speaker: "you", text: "Alex from the ML team said we can't use async for the eval loop. It breaks their CUDA bindings." },
+      { speaker: "claude", text: "Important constraint. Sync eval loop it is." },
+      { speaker: "system", text: "saved [relational] Alex (ML team): no async in eval loop, breaks CUDA bindings" },
+    ],
+  },
+  {
+    label: "session 2 (next day)",
+    lines: [
+      { speaker: "you", text: "Let's add concurrency to the eval loop." },
+      { speaker: "claude", text: "Heads up: Alex from the ML team said async breaks their CUDA bindings. Want to check with him first, or use a thread pool instead?" },
+      { speaker: "system", text: "recalled [relational] Alex (ML team): no async in eval loop" },
+      { speaker: "you", text: "Oh right. Thread pool works. Also, I talked to Alex and he actually left the ML team. Sarah is the new lead." },
+      { speaker: "claude", text: "Updated. Sarah is the ML team lead now." },
+      { speaker: "system", text: "saved [correction] Sarah replaced Alex as ML team lead" },
+    ],
+  },
+  {
+    label: "session 3 (a week later)",
+    lines: [
+      { speaker: "you", text: "Set up the deployment pipeline." },
+      { speaker: "claude", text: "Building the pipeline for the Rust chess API. Using sync thread pool for the eval loop per Sarah's team constraints. Targeting sub-10ms latency. Want me to add benchmark gates to the CI?" },
+      { speaker: "you", text: "...you remembered all of that?" },
+      { speaker: "claude", text: "That's what I'm here for." },
+    ],
+  },
+];
+
+const TYPING_SPEED = 18;   // ms per character
+const LINE_PAUSE = 600;    // ms between lines
+const SCENE_PAUSE = 2000;  // ms between scenes
+const END_PAUSE = 4000;    // ms before restarting
+
 export function Hero() {
   const [copied, setCopied] = useState(false);
+  const [visibleLines, setVisibleLines] = useState<
+    { sceneIdx: number; lineIdx: number; chars: number }[]
+  >([]);
+  const [currentScene, setCurrentScene] = useState(0);
+  const animRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const installCmd = "uv tool install claude-memory-kit";
 
@@ -18,6 +64,97 @@ export function Hero() {
     navigator.clipboard.writeText(installCmd);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function sleep(ms: number) {
+      return new Promise<void>((resolve) => {
+        animRef.current = setTimeout(() => {
+          if (!cancelled) resolve();
+        }, ms);
+      });
+    }
+
+    async function animate() {
+      while (!cancelled) {
+        for (let si = 0; si < SCENES.length && !cancelled; si++) {
+          setCurrentScene(si);
+          const scene = SCENES[si];
+
+          for (let li = 0; li < scene.lines.length && !cancelled; li++) {
+            const line = scene.lines[li];
+            const totalChars = line.text.length;
+
+            // Type out character by character
+            for (let c = 0; c <= totalChars && !cancelled; c++) {
+              setVisibleLines((prev) => {
+                const existing = prev.filter(
+                  (l) => !(l.sceneIdx === si && l.lineIdx === li)
+                );
+                return [...existing, { sceneIdx: si, lineIdx: li, chars: c }];
+              });
+              if (c < totalChars) await sleep(TYPING_SPEED);
+            }
+
+            // Scroll to bottom
+            if (containerRef.current) {
+              containerRef.current.scrollTop = containerRef.current.scrollHeight;
+            }
+
+            await sleep(LINE_PAUSE);
+          }
+
+          if (si < SCENES.length - 1) {
+            await sleep(SCENE_PAUSE);
+          }
+        }
+
+        await sleep(END_PAUSE);
+
+        // Reset for loop
+        setVisibleLines([]);
+        setCurrentScene(0);
+      }
+    }
+
+    animate();
+
+    return () => {
+      cancelled = true;
+      if (animRef.current) clearTimeout(animRef.current);
+    };
+  }, []);
+
+  function renderLine(
+    sceneIdx: number,
+    lineIdx: number,
+    line: { speaker: string; text: string },
+    chars: number
+  ) {
+    const text = line.text.slice(0, chars);
+    const cursor = chars < line.text.length ? "\u2588" : "";
+
+    if (line.speaker === "system") {
+      return (
+        <div
+          key={`${sceneIdx}-${lineIdx}`}
+          className="mt-1 text-[11px]"
+          style={{ color: "rgba(255,255,255,0.25)" }}
+        >
+          {text}{cursor}
+        </div>
+      );
+    }
+
+    const color = line.speaker === "you" ? "#60a5fa" : "#a78bfa";
+    return (
+      <div key={`${sceneIdx}-${lineIdx}`} className="mt-2">
+        <span style={{ color }}>{line.speaker}:</span>{" "}
+        <span>{text}{cursor}</span>
+      </div>
+    );
   }
 
   return (
@@ -91,7 +228,7 @@ export function Hero() {
           </div>
         </div>
 
-        {/* Right: install card */}
+        {/* Right: animated terminal */}
         <div style={{ animation: "drift-up 500ms ease 200ms both" }}>
           <div
             className="rounded-[var(--radius-lg)] overflow-hidden"
@@ -117,81 +254,44 @@ export function Hero() {
                 className="ml-2 text-[12px] font-mono"
                 style={{ color: "rgba(255,255,255,0.35)" }}
               >
-                quickstart
+                {SCENES[currentScene]?.label ?? "session 1"}
               </span>
             </div>
 
             {/* Terminal body */}
             <div
-              className="px-5 py-5 font-mono text-[13px] leading-[1.8]"
-              style={{ background: "var(--code-bg)", color: "var(--code-fg)" }}
+              ref={containerRef}
+              className="px-5 py-5 font-mono text-[13px] leading-[1.7] overflow-y-auto"
+              style={{
+                background: "var(--code-bg)",
+                color: "var(--code-fg)",
+                height: "320px",
+              }}
             >
-              {/* Step 1: install */}
-              <div style={{ color: "rgba(255,255,255,0.35)" }}># install</div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1 min-w-0">
-                  <span style={{ color: "#22c55e" }}>$</span>{" "}
-                  <span>{installCmd}</span>
-                </div>
-                <button
-                  onClick={handleCopy}
-                  className="shrink-0 px-2 py-1 rounded text-[11px]"
-                  style={{
-                    background: "rgba(255,255,255,0.08)",
-                    color: "rgba(255,255,255,0.5)",
-                    border: "1px solid rgba(255,255,255,0.1)",
-                    cursor: "pointer",
-                    transition: "all 140ms ease",
-                  }}
-                >
-                  {copied ? "copied" : "copy"}
-                </button>
-              </div>
+              {SCENES.map((scene, si) => {
+                const sceneLines = visibleLines.filter((l) => l.sceneIdx === si);
+                if (sceneLines.length === 0) return null;
 
-              {/* Step 2: connect */}
-              <div className="mt-4" style={{ color: "rgba(255,255,255,0.35)" }}>
-                # connect to your account (get key at cmk.dev/dashboard/setup)
-              </div>
-              <div>
-                <span style={{ color: "#22c55e" }}>$</span>{" "}
-                <span>cmk init</span>{" "}
-                <span style={{ color: "rgba(255,255,255,0.35)" }}>your-api-key</span>
-              </div>
-
-              {/* Step 3: use */}
-              <div className="mt-4" style={{ color: "rgba(255,255,255,0.35)" }}>
-                # or just run locally, no account needed
-              </div>
-              <div>
-                <span style={{ color: "#22c55e" }}>$</span>{" "}
-                <span>claude</span>{" "}
-                <span style={{ color: "rgba(255,255,255,0.35)" }}>
-                  # CMK auto-activates as MCP server
-                </span>
-              </div>
-
-              {/* Demo */}
-              <div className="mt-5 pt-4" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-                <div>
-                  <span style={{ color: "#60a5fa" }}>you:</span>{" "}
-                  I use tabs, not spaces. Deploy target is always Render.
-                </div>
-                <div className="mt-1">
-                  <span style={{ color: "#a78bfa" }}>claude:</span>{" "}
-                  Noted. I&apos;ll remember both preferences.
-                </div>
-                <div className="mt-3" style={{ color: "rgba(255,255,255,0.25)" }}>
-                  ── next session ──
-                </div>
-                <div className="mt-1">
-                  <span style={{ color: "#60a5fa" }}>you:</span>{" "}
-                  Set up the project config.
-                </div>
-                <div className="mt-1">
-                  <span style={{ color: "#a78bfa" }}>claude:</span>{" "}
-                  Done. Used tabs for indentation and added render.yaml.
-                </div>
-              </div>
+                return (
+                  <div key={si}>
+                    {si > 0 && (
+                      <div
+                        className="mt-4 mb-3 text-[11px] text-center"
+                        style={{
+                          color: "rgba(255,255,255,0.2)",
+                          borderTop: "1px solid rgba(255,255,255,0.06)",
+                          paddingTop: "12px",
+                        }}
+                      >
+                        {scene.label}
+                      </div>
+                    )}
+                    {sceneLines.map((vl) =>
+                      renderLine(si, vl.lineIdx, scene.lines[vl.lineIdx], vl.chars)
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

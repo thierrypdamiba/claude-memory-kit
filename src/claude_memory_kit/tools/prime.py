@@ -8,11 +8,11 @@ log = logging.getLogger("cmk")
 async def do_prime(
     store: Store, message: str, user_id: str = "local"
 ) -> str:
-    """Proactive recall. Fast path: vector search only (top 3)."""
+    """Proactive recall. Hybrid search (dense + sparse, RRF) top 3."""
     try:
         results = store.vectors.search(message, limit=3, user_id=user_id)
     except Exception as e:
-        log.warning("prime vector search failed: %s", e)
+        log.warning("prime hybrid search failed: %s", e)
         return "No relevant memories found."
 
     if not results:
