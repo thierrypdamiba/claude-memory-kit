@@ -48,8 +48,10 @@ pub async fn extract_memories(
     }
 
     let data: serde_json::Value = resp.json().await?;
-    let text = data["content"][0]["text"]
-        .as_str()
+    let text = data.get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
         .unwrap_or("[]");
 
     // Parse the JSON array from the response
@@ -58,8 +60,10 @@ pub async fn extract_memories(
             // Try to find JSON array in the response
             if let Some(start) = text.find('[') {
                 if let Some(end) = text.rfind(']') {
-                    return serde_json::from_str(&text[start..=end])
-                        .unwrap_or_default();
+                    if start < end {
+                        return serde_json::from_str(&text[start..=end])
+                            .unwrap_or_default();
+                    }
                 }
             }
             Vec::new()
@@ -100,8 +104,10 @@ pub async fn consolidate_entries(
         .await?;
 
     let data: serde_json::Value = resp.json().await?;
-    let text = data["content"][0]["text"]
-        .as_str()
+    let text = data.get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
         .unwrap_or("(consolidation produced no output)")
         .to_string();
 
@@ -138,8 +144,10 @@ pub async fn regenerate_identity(
         .await?;
 
     let data: serde_json::Value = resp.json().await?;
-    let text = data["content"][0]["text"]
-        .as_str()
+    let text = data.get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
         .unwrap_or("(identity generation produced no output)")
         .to_string();
 

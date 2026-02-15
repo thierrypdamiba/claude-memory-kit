@@ -24,7 +24,7 @@ async def do_remember(
         )
 
     now = datetime.now(timezone.utc)
-    mem_id = f"mem_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
+    mem_id = f"mem_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     memory = Memory(
         id=mem_id,

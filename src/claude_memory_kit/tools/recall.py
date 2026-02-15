@@ -13,9 +13,13 @@ async def do_recall(
     seen_ids: set[str] = set()
 
     # 1. FTS search (sync, run in thread)
-    fts_results = await asyncio.to_thread(
-        store.db.search_fts, query, 5, user_id
-    )
+    try:
+        fts_results = await asyncio.to_thread(
+            store.db.search_fts, query, 5, user_id
+        )
+    except Exception as e:
+        log.warning("FTS search failed: %s", e)
+        fts_results = []
     for mem in fts_results:
         if mem.id not in seen_ids:
             seen_ids.add(mem.id)

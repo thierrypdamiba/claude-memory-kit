@@ -33,7 +33,9 @@ export default function TimelinePage() {
       await api.forget(id, "deleted from timeline");
       setMemories((prev) => prev.filter((m) => m.id !== id));
       if (selected?.id === id) setSelected(null);
-    } catch {}
+    } catch (e) {
+      console.error("forget failed:", e);
+    }
   };
 
   if (loading) return <Loading />;

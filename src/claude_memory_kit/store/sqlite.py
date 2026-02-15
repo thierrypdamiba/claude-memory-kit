@@ -285,6 +285,8 @@ class SqliteStore:
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return
+        if "gate" in updates and Gate.from_str(updates["gate"]) is None:
+            raise ValueError(f"invalid gate: {updates['gate']}")
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         params = list(updates.values()) + [id, user_id]
         self.conn.execute(
