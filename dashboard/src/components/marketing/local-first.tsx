@@ -95,7 +95,7 @@ export function LocalFirst() {
 
           <div className="space-y-2">
             <FeatureRow text="Runs entirely on your machine" />
-            <FeatureRow text="Bring your own Anthropic key" />
+            <FeatureRow text="Bring your own keys" />
             <FeatureRow text="fastembed for local vectors" />
             <FeatureRow text="Single-device, full control" />
           </div>
