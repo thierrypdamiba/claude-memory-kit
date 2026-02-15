@@ -38,7 +38,10 @@ export default function RootLayout({
   if (hasClerk) {
     return (
       <html lang="en">
-        <ClerkProvider>
+        <ClerkProvider
+            afterSignInUrl="/dashboard"
+            afterSignUpUrl="/dashboard"
+          >
           <body className={fontVars}>
             <AuthProvider>{children}</AuthProvider>
           </body>
