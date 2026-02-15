@@ -109,6 +109,23 @@ export function MarketingNav() {
             </svg>
           </a>
           <Link
+            href="/sign-up"
+            className="px-3.5 py-1.5 rounded-[var(--radius)] text-[14px] font-medium"
+            style={{
+              border: "1px solid var(--border)",
+              color: "var(--foreground)",
+              background: "transparent",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = "var(--surface-hover)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = "transparent";
+            }}
+          >
+            Sign up
+          </Link>
+          <Link
             href="/docs/install"
             className="px-3.5 py-1.5 rounded-[var(--radius)] text-[14px] font-medium"
             style={{
