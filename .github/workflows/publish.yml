@@ -1,0 +1,117 @@
+name: publish
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: check if version changed
+        id: check
+        run: |
+          CURRENT=$(python -c "import re; print(re.search(r'version = \"(.+?)\"', open('pyproject.toml').read()).group(1))")
+          PREVIOUS=$(git show HEAD~1:pyproject.toml 2>/dev/null | python -c "import re,sys; print(re.search(r'version = \"(.+?)\"', sys.stdin.read()).group(1))" 2>/dev/null || echo "0.0.0")
+          echo "current=$CURRENT previous=$PREVIOUS"
+          if [ "$CURRENT" != "$PREVIOUS" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  test:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: set up python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: install dependencies
+        run: uv sync --dev
+
+      - name: run tests
+        run: |
+          uv run pytest tests/ \
+            --cov=claude_memory_kit \
+            --cov-report=term-missing \
+            --cov-fail-under=90 \
+            -x -v \
+            -m "not slow"
+
+  publish-test:
+    needs: [check-version, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: set up python
+        run: uv python install 3.12
+
+      - name: build
+        run: uv build
+
+      - name: publish to test pypi
+        run: uv publish --publish-url https://test.pypi.org/legacy/ --token ${{ secrets.TEST_PYPI_TOKEN }} dist/*
+
+      - name: wait for test pypi index
+        run: sleep 15
+
+      - name: install from test pypi and smoke test
+        run: |
+          VERSION=${{ needs.check-version.outputs.version }}
+          uv pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "claude-memory-kit==$VERSION"
+          python -c "
+          from claude_memory_kit import __version__
+          from claude_memory_kit.store.qdrant_store import QdrantStore
+          from claude_memory_kit.store import Store
+          from claude_memory_kit.server import create_server, TOOL_DEFS
+          assert len(TOOL_DEFS) == 4
+          assert __version__ == '$VERSION'
+          print(f'smoke test passed: v{__version__}')
+          "
+
+  publish-prod:
+    needs: [check-version, publish-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: set up python
+        run: uv python install 3.12
+
+      - name: build
+        run: uv build
+
+      - name: publish to pypi
+        run: uv publish --token ${{ secrets.PYPI_TOKEN }} dist/*
