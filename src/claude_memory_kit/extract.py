@@ -9,7 +9,7 @@ from .config import get_model
 log = logging.getLogger("cmk")
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-CMK_CLOUD_URL = os.getenv("CMK_API_URL", "https://cmk.dev")
+CMK_CLOUD_URL = os.getenv("CMK_API_URL", "https://cmk-api.onrender.com")
 
 EXTRACTION_PROMPT = """You are Claude's memory system. Read this conversation transcript and extract any memories worth keeping. Each memory must pass at least one write gate:
 - Behavioral: will change how Claude acts next time

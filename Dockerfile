@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 WORKDIR /app
 RUN pip install uv
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
 RUN uv pip install --system -e .
 EXPOSE 7749
