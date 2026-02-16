@@ -188,18 +188,28 @@ class TestConfig:
 
     def test_get_api_key_empty(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-        key = config_module.get_api_key()
+        with patch("claude_memory_kit.cli_auth.get_api_key", return_value=None):
+            key = config_module.get_api_key()
         assert key == ""
 
     def test_get_api_key_placeholder(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "<your-api-key>")
-        key = config_module.get_api_key()
+        with patch("claude_memory_kit.cli_auth.get_api_key", return_value=None):
+            key = config_module.get_api_key()
         assert key == "<your-api-key>"
 
     def test_get_api_key_real(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-real-key-123")
-        key = config_module.get_api_key()
+        with patch("claude_memory_kit.cli_auth.get_api_key", return_value=None):
+            key = config_module.get_api_key()
         assert key == "sk-ant-real-key-123"
+
+    def test_get_api_key_cmk_cloud_key(self, monkeypatch):
+        """CMK cloud key takes priority over local ANTHROPIC_API_KEY."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-local-key")
+        with patch("claude_memory_kit.cli_auth.get_api_key", return_value="cmk-sk-cloud-key-123"):
+            key = config_module.get_api_key()
+        assert key == "cmk-sk-cloud-key-123"
 
     def test_get_store_path_default(self, monkeypatch):
         monkeypatch.delenv("MEMORY_STORE_PATH", raising=False)

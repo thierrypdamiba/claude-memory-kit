@@ -88,7 +88,7 @@ async def classify_single(
     if not api_key:
         return {"level": "unknown", "reason": "no API key configured"}
 
-    mem = store.db.get_memory(memory_id, user_id=user_id)
+    mem = store.qdrant.get_memory(memory_id, user_id=user_id)
     if not mem:
         return {"level": "unknown", "reason": "memory not found"}
 
@@ -104,7 +104,7 @@ async def classify_single(
         reason = result.get("reason", "")
 
         if level in ("safe", "sensitive", "critical"):
-            store.db.update_sensitivity(memory_id, level, reason, user_id=user_id)
+            store.qdrant.update_sensitivity(memory_id, level, reason, user_id=user_id)
             return {"level": level, "reason": reason}
 
         return {"level": "unknown", "reason": "invalid classification response"}
@@ -134,9 +134,9 @@ async def classify_memories(
         return "No API key configured. Cannot classify memories."
 
     if force:
-        memories = store.db.list_memories(limit=500, user_id=user_id)
+        memories = store.qdrant.list_memories(limit=500, user_id=user_id)
     else:
-        memories = store.db.list_memories_by_sensitivity(
+        memories = store.qdrant.list_memories_by_sensitivity(
             None, limit=500, user_id=user_id
         )
 
@@ -168,7 +168,7 @@ async def classify_memories(
             for mem in batch:
                 r = by_id.get(mem.id)
                 if r and r.get("level") in ("safe", "sensitive", "critical"):
-                    store.db.update_sensitivity(
+                    store.qdrant.update_sensitivity(
                         mem.id, r["level"], r.get("reason", ""),
                         user_id=user_id,
                     )
@@ -199,11 +199,11 @@ async def reclassify_memory(
     if new_level not in ("safe", "sensitive", "critical"):
         return f"Invalid level '{new_level}'. Use: safe, sensitive, critical"
 
-    mem = store.db.get_memory(memory_id, user_id=user_id)
+    mem = store.qdrant.get_memory(memory_id, user_id=user_id)
     if not mem:
         return "Memory not found."
 
-    store.db.update_sensitivity(
+    store.qdrant.update_sensitivity(
         memory_id, new_level, "manually reclassified by user",
         user_id=user_id,
     )

@@ -212,41 +212,62 @@ def _write_mcp_config(user_id: str) -> str | None:
     return local_mcp
 
 
+def _validate_key_cloud(api_key: str) -> dict | None:
+    """Validate API key against the cloud API."""
+    cloud_url = os.getenv("CMK_API_URL", "https://cmk.dev")
+    try:
+        import httpx
+        resp = httpx.get(
+            f"{cloud_url}/api/auth/me",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("user")
+    except Exception:
+        pass
+    return None
+
+
+def _validate_key_local(api_key: str) -> dict | None:
+    """Validate API key against the local SQLite store."""
+    try:
+        from .config import get_store_path
+        from .store.sqlite import SqliteStore
+        from .auth_keys import validate_api_key
+
+        db = SqliteStore(get_store_path())
+        db.migrate()
+        return validate_api_key(api_key, db)
+    except Exception:
+        return None
+
+
 def do_init(api_key: str) -> None:
     """Initialize CMK with an API key from cmk.dev."""
     if not api_key.startswith("cmk-sk-"):
         click.echo("Invalid API key. Keys start with 'cmk-sk-'.")
         return
 
-    # Validate key against the local store
-    from .config import get_store_path
-    from .store.sqlite import SqliteStore
-    from .auth_keys import validate_api_key
-
-    db = SqliteStore(get_store_path())
-    db.migrate()
-
-    user = validate_api_key(api_key, db)
+    # Try cloud first, then local
+    click.echo("Validating API key...")
+    user = _validate_key_cloud(api_key)
     if not user:
-        # Key not in local DB yet. Try fetching user info from the API.
-        api_url = os.getenv("CMK_API_URL", "http://localhost:7749")
-        try:
-            import httpx
-            resp = httpx.get(
-                f"{api_url}/api/auth/me",
-                headers={"Authorization": f"Bearer {api_key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                user = data.get("user")
-        except Exception:
-            pass
+        user = _validate_key_local(api_key)
 
+    # If neither validated but the key format is correct, accept it.
+    # The user got this key from cmk.dev, so trust it and store locally.
+    # Validation will happen on first API call.
     if not user or not user.get("id"):
-        click.echo("Could not validate API key.")
-        click.echo("Make sure 'cmk serve' is running, or set CMK_API_URL.")
-        return
+        # Derive a user_id from the key hash so we have something stable
+        import hashlib
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
+        user = {"id": f"user_{key_hash}", "email": ""}
+        click.echo("Could not reach cmk.dev to validate (offline or not deployed yet).")
+        click.echo("Key saved locally. It will be validated on first sync.")
+    else:
+        click.echo(f"Authenticated as {user.get('email') or user['id']}.")
 
     # Save credentials
     _save_credentials({
@@ -254,8 +275,6 @@ def do_init(api_key: str) -> None:
         "user_id": user["id"],
         "email": user.get("email", ""),
     })
-
-    click.echo(f"Authenticated as {user.get('email') or user['id']}.")
 
     # Write MCP config
     written_path = _write_mcp_config(user["id"])
@@ -275,7 +294,7 @@ def do_init(api_key: str) -> None:
     _check_local_data_hint()
 
     click.echo()
-    click.echo("Ready. Start a Claude session and your memories will sync.")
+    click.echo("Ready. Start a Claude session and your memories will persist.")
 
 
 def do_logout() -> None:

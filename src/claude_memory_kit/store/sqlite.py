@@ -16,7 +16,51 @@ class SqliteStore:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
+    # Current schema version. Bump when adding new migrations.
+    SCHEMA_VERSION = 5
+
     def migrate(self) -> None:
+        """Run all pending schema migrations in order."""
+        current = self._get_schema_version()
+        migrations = [
+            self._migration_1_initial_schema,
+            self._migration_2_add_columns,
+            self._migration_3_add_pinned,
+            self._migration_4_indexes,
+            self._migration_5_fts,
+        ]
+        for i, fn in enumerate(migrations, start=1):
+            if current < i:
+                fn()
+        self._set_schema_version(self.SCHEMA_VERSION)
+        self.conn.commit()
+
+    def _get_schema_version(self) -> int:
+        """Get current schema version, creating tracking table if needed."""
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version "
+            "(id INTEGER PRIMARY KEY CHECK (id = 1), version INTEGER NOT NULL)"
+        )
+        row = self.conn.execute(
+            "SELECT version FROM schema_version WHERE id = 1"
+        ).fetchone()
+        if row:
+            return row[0]
+        # Detect pre-versioned databases (tables exist but no version row)
+        existing = self.conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='memories'"
+        ).fetchone()
+        return 0 if existing else 0
+
+    def _set_schema_version(self, version: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_version (id, version) VALUES (1, ?)",
+            (version,),
+        )
+
+    def _migration_1_initial_schema(self) -> None:
+        """Create all core tables."""
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS memories (
                 id TEXT PRIMARY KEY,
@@ -120,10 +164,33 @@ class SqliteStore:
             );
             CREATE INDEX IF NOT EXISTS idx_rules_user
                 ON rules(user_id);
-
         """)
-        self._migrate_add_columns()
-        # Create user_id indexes after columns are guaranteed to exist
+
+    def _migration_2_add_columns(self) -> None:
+        """Add user_id and sensitivity columns to existing tables."""
+        columns = [
+            ("memories", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
+            ("journal", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
+            ("edges", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
+            ("archive", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
+            ("memories", "sensitivity", "TEXT"),
+            ("memories", "sensitivity_reason", "TEXT"),
+        ]
+        for table, col, typedef in columns:
+            if not self._has_column(table, col):
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {col} {typedef}"
+                )
+
+    def _migration_3_add_pinned(self) -> None:
+        """Add pinned column to memories."""
+        if not self._has_column("memories", "pinned"):
+            self.conn.execute(
+                "ALTER TABLE memories ADD COLUMN pinned INTEGER DEFAULT 0"
+            )
+
+    def _migration_4_indexes(self) -> None:
+        """Create all indexes for common query patterns."""
         self.conn.executescript("""
             CREATE INDEX IF NOT EXISTS idx_memories_user
                 ON memories(user_id);
@@ -131,9 +198,7 @@ class SqliteStore:
                 ON journal(user_id);
             CREATE INDEX IF NOT EXISTS idx_archive_user
                 ON archive(user_id);
-        """)
-        # Composite indexes for common query patterns
-        self.conn.executescript("""
+
             CREATE INDEX IF NOT EXISTS idx_memories_user_gate_created
                 ON memories(user_id, gate, created DESC);
             CREATE INDEX IF NOT EXISTS idx_memories_user_person
@@ -152,89 +217,58 @@ class SqliteStore:
             CREATE INDEX IF NOT EXISTS idx_memories_user_sensitivity
                 ON memories(user_id, sensitivity);
         """)
-        self._ensure_fts()
-        self._ensure_fts_update_trigger()
-        self.conn.commit()
 
-    def _migrate_add_columns(self) -> None:
-        """Safely add user_id columns to existing tables."""
-        migrations = [
-            ("memories", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
-            ("journal", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
-            ("edges", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
-            ("archive", "user_id", "TEXT NOT NULL DEFAULT 'local'"),
-            ("memories", "sensitivity", "TEXT"),
-            ("memories", "sensitivity_reason", "TEXT"),
-        ]
-        for table, col, typedef in migrations:
-            try:
-                self.conn.execute(
-                    f"ALTER TABLE {table} ADD COLUMN {col} {typedef}"
-                )
-            except sqlite3.OperationalError:
-                pass  # column already exists
-
-    def _ensure_fts(self) -> None:
-        # Check if FTS table exists
-        row = self.conn.execute(
+    def _migration_5_fts(self) -> None:
+        """Set up FTS5 virtual table and triggers."""
+        fts_exists = self.conn.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='table' AND name='memories_fts'"
         ).fetchone()
-        if row:
+        if not fts_exists:
+            self.conn.executescript("""
+                CREATE VIRTUAL TABLE memories_fts USING fts5(
+                    content, person, project,
+                    content='memories', content_rowid='rowid'
+                );
+                CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_fts(rowid, content, person, project)
+                    VALUES (new.rowid, new.content, new.person, new.project);
+                END;
+                CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
+                    INSERT INTO memories_fts(
+                        memories_fts, rowid, content, person, project
+                    ) VALUES (
+                        'delete', old.rowid, old.content, old.person, old.project
+                    );
+                END;
+                CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memories_fts(
+                        memories_fts, rowid, content, person, project
+                    ) VALUES (
+                        'delete', old.rowid, old.content, old.person, old.project
+                    );
+                    INSERT INTO memories_fts(rowid, content, person, project)
+                    VALUES (new.rowid, new.content, new.person, new.project);
+                END;
+            """)
             return
-        self.conn.executescript("""
-            CREATE VIRTUAL TABLE memories_fts USING fts5(
-                content, person, project,
-                content='memories', content_rowid='rowid'
-            );
-            CREATE TRIGGER memories_ai AFTER INSERT ON memories BEGIN
-                INSERT INTO memories_fts(rowid, content, person, project)
-                VALUES (new.rowid, new.content, new.person, new.project);
-            END;
-            CREATE TRIGGER memories_ad AFTER DELETE ON memories BEGIN
-                INSERT INTO memories_fts(
-                    memories_fts, rowid, content, person, project
-                ) VALUES (
-                    'delete', old.rowid, old.content, old.person, old.project
-                );
-            END;
-            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
-                INSERT INTO memories_fts(
-                    memories_fts, rowid, content, person, project
-                ) VALUES (
-                    'delete', old.rowid, old.content, old.person, old.project
-                );
-                INSERT INTO memories_fts(rowid, content, person, project)
-                VALUES (new.rowid, new.content, new.person, new.project);
-            END;
-        """)
-
-    def _ensure_fts_update_trigger(self) -> None:
-        """Add AFTER UPDATE trigger for existing databases that only have INSERT/DELETE triggers."""
-        row = self.conn.execute(
+        # Ensure update trigger exists for pre-existing FTS setups
+        au_exists = self.conn.execute(
             "SELECT name FROM sqlite_master "
             "WHERE type='trigger' AND name='memories_au'"
         ).fetchone()
-        if row:
-            return
-        # Only create if FTS table exists
-        fts = self.conn.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='memories_fts'"
-        ).fetchone()
-        if not fts:
-            return
-        self.conn.executescript("""
-            CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
-                INSERT INTO memories_fts(
-                    memories_fts, rowid, content, person, project
-                ) VALUES (
-                    'delete', old.rowid, old.content, old.person, old.project
-                );
-                INSERT INTO memories_fts(rowid, content, person, project)
-                VALUES (new.rowid, new.content, new.person, new.project);
-            END;
-        """)
+        if not au_exists:
+            self.conn.executescript("""
+                CREATE TRIGGER memories_au AFTER UPDATE ON memories BEGIN
+                    INSERT INTO memories_fts(
+                        memories_fts, rowid, content, person, project
+                    ) VALUES (
+                        'delete', old.rowid, old.content, old.person, old.project
+                    );
+                    INSERT INTO memories_fts(rowid, content, person, project)
+                    VALUES (new.rowid, new.content, new.person, new.project);
+                END;
+            """)
 
     # ---- Memory CRUD ----
 
@@ -346,13 +380,7 @@ class SqliteStore:
     def set_pinned(
         self, id: str, pinned: bool, user_id: str = "local"
     ) -> None:
-        """Set the pinned flag on a memory. Adds column if missing."""
-        try:
-            self.conn.execute(
-                "ALTER TABLE memories ADD COLUMN pinned INTEGER DEFAULT 0"
-            )
-        except Exception:
-            pass
+        """Set the pinned flag on a memory."""
         self.conn.execute(
             "UPDATE memories SET pinned = ? WHERE id = ? AND user_id = ?",
             (1 if pinned else 0, id, user_id),
@@ -458,6 +486,35 @@ class SqliteStore:
         )
         self.conn.commit()
 
+    def insert_journal_raw(
+        self, date: str, gate: Gate, content: str,
+        person: str | None = None, project: str | None = None,
+        user_id: str = "local",
+    ) -> None:
+        """Insert a journal entry with a custom date string (for digests)."""
+        self.conn.execute(
+            "INSERT INTO journal "
+            "(date, timestamp, gate, content, person, project, user_id) "
+            "VALUES (?, datetime('now'), ?, ?, ?, ?, ?)",
+            (date, gate.value, content, person, project, user_id),
+        )
+        self.conn.commit()
+
+    def find_recent_in_context(
+        self, exclude_id: str, cutoff: str,
+        person: str | None, project: str | None,
+        user_id: str = "local",
+    ) -> str | None:
+        """Find the most recent memory id matching person/project within cutoff."""
+        row = self.conn.execute(
+            "SELECT id FROM memories "
+            "WHERE id != ? AND created > ? AND user_id = ? "
+            "AND (person = ? OR project = ?) "
+            "ORDER BY created DESC LIMIT 1",
+            (exclude_id, cutoff, user_id, person or "", project or ""),
+        ).fetchone()
+        return row[0] if row else None
+
     def recent_journal(
         self, days: int = 3, user_id: str = "local"
     ) -> list[dict]:
@@ -505,9 +562,9 @@ class SqliteStore:
         """Get the most recent checkpoint journal entry."""
         row = self.conn.execute(
             "SELECT * FROM journal "
-            "WHERE gate = 'checkpoint' AND user_id = ? "
+            "WHERE gate = ? AND user_id = ? "
             "ORDER BY timestamp DESC LIMIT 1",
-            (user_id,),
+            (Gate.checkpoint.value, user_id),
         ).fetchone()
         if not row:
             return None

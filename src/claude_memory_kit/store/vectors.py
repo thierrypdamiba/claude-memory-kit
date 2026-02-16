@@ -65,7 +65,7 @@ class VectorStore:
                 self.client = QdrantClient(path=qdrant_path)
             except RuntimeError as e:
                 if "already accessed" in str(e):
-                    log.warning("qdrant locked. vectors disabled, FTS only.")
+                    log.debug("qdrant locked. vectors disabled, FTS only.")
                     self.client = None
                     self._disabled = True
                 else:
@@ -223,6 +223,17 @@ class VectorStore:
             ),
         )
 
+        # Payload indexes for metadata queries
+        for field in ("type", "gate", "sensitivity", "person", "project",
+                       "memory_id", "date", "rule_id"):
+            self.client.create_payload_index(
+                collection_name=COLLECTION,
+                field_name=field,
+                field_schema=KeywordIndexParams(
+                    type=KeywordIndexType.KEYWORD,
+                ),
+            )
+
         if self._cloud:
             self.client.create_payload_index(
                 collection_name=COLLECTION,
@@ -257,11 +268,22 @@ class VectorStore:
         person: str | None,
         project: str | None,
         user_id: str | None = None,
+        *,
+        gate: str | None = None,
+        confidence: float | None = None,
+        created: float | None = None,
+        last_accessed: float | None = None,
+        access_count: int | None = None,
+        decay_class: str | None = None,
+        pinned: bool | None = None,
+        sensitivity: str | None = None,
+        sensitivity_reason: str | None = None,
     ) -> None:
         if self._disabled:
             return
         point_id = _stable_id(memory_id)
-        payload = {
+        payload: dict = {
+            "type": "memory",
             "memory_id": memory_id,
             "content": content,
             "person": person or "",
@@ -269,6 +291,24 @@ class VectorStore:
         }
         if user_id:
             payload["user_id"] = user_id
+        if gate is not None:
+            payload["gate"] = gate
+        if confidence is not None:
+            payload["confidence"] = confidence
+        if created is not None:
+            payload["created"] = created
+        if last_accessed is not None:
+            payload["last_accessed"] = last_accessed
+        if access_count is not None:
+            payload["access_count"] = access_count
+        if decay_class is not None:
+            payload["decay_class"] = decay_class
+        if pinned is not None:
+            payload["pinned"] = pinned
+        if sensitivity is not None:
+            payload["sensitivity"] = sensitivity
+        if sensitivity_reason is not None:
+            payload["sensitivity_reason"] = sensitivity_reason
 
         if self._cloud:
             vector = {
@@ -297,11 +337,14 @@ class VectorStore:
         if self._disabled:
             return []
 
-        query_filter = None
+        must_conditions = [
+            FieldCondition(key="type", match=MatchValue(value="memory")),
+        ]
         if user_id:
-            query_filter = Filter(must=[
+            must_conditions.append(
                 FieldCondition(key="user_id", match=MatchValue(value=user_id))
-            ])
+            )
+        query_filter = Filter(must=must_conditions)
 
         if self._cloud:
             dense_query = self._jina_doc(query, task="retrieval.query")
@@ -356,16 +399,14 @@ class VectorStore:
             return []
 
         # Build filter conditions
-        must = []
+        must = [
+            FieldCondition(key="type", match=MatchValue(value="memory")),
+            FieldCondition(key="content", match=MatchText(text=query)),
+        ]
         if user_id:
             must.append(
                 FieldCondition(key="user_id", match=MatchValue(value=user_id))
             )
-
-        # MatchText does substring/token matching on text-indexed fields
-        must.append(
-            FieldCondition(key="content", match=MatchText(text=query))
-        )
 
         results, _offset = self.client.scroll(
             collection_name=COLLECTION,

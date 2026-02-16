@@ -15,14 +15,14 @@ async def do_recall(
     # 1. Hybrid search (dense + sparse with RRF fusion) via Qdrant
     try:
         vec_results = await asyncio.to_thread(
-            store.vectors.search, query, 10, user_id
+            store.qdrant.search, query, 10, user_id
         )
         for mem_id, score in vec_results:
             if mem_id not in seen_ids:
                 seen_ids.add(mem_id)
-                full = store.db.get_memory(mem_id, user_id=user_id)
+                full = store.qdrant.get_memory(mem_id, user_id=user_id)
                 if full:
-                    store.db.touch_memory(mem_id, user_id=user_id)
+                    store.qdrant.touch_memory(mem_id, user_id=user_id)
                     person = full.person or "?"
                     results.append(
                         f"[{full.gate.value}, score={score:.2f}] "
@@ -32,59 +32,41 @@ async def do_recall(
     except Exception as e:
         log.warning("hybrid search failed: %s", e)
 
-    # 2. Keyword fallback when hybrid returned nothing
-    #    Cloud: Qdrant text index (payload indexes work, scales horizontally)
-    #    Local: SQLite FTS5 (always available, no payload index support)
-    if not results:
-        if store.vectors._cloud and not store.vectors._disabled:
-            try:
-                text_results = await asyncio.to_thread(
-                    store.vectors.search_text, query, 5, user_id
-                )
-                for mem_id, score in text_results:
-                    if mem_id not in seen_ids:
-                        seen_ids.add(mem_id)
-                        full = store.db.get_memory(mem_id, user_id=user_id)
-                        if full:
-                            store.db.touch_memory(mem_id, user_id=user_id)
-                            person = full.person or "?"
-                            results.append(
-                                f"[{full.gate.value}, text] "
-                                f"({full.created:%Y-%m-%d}, {person}) "
-                                f"{full.content}\n  id: {full.id}"
-                            )
-            except Exception as e:
-                log.warning("qdrant text search failed: %s", e)
-        else:
-            try:
-                fts_results = await asyncio.to_thread(
-                    store.db.search_fts, query, 5, user_id
-                )
-                for mem in fts_results:
-                    if mem.id not in seen_ids:
-                        seen_ids.add(mem.id)
-                        store.db.touch_memory(mem.id, user_id=user_id)
-                        person = mem.person or "?"
+    # 2. Text search fallback when hybrid returned nothing
+    if not results and not store.qdrant._disabled:
+        try:
+            text_results = await asyncio.to_thread(
+                store.qdrant.search_text, query, 5, user_id
+            )
+            for mem_id, score in text_results:
+                if mem_id not in seen_ids:
+                    seen_ids.add(mem_id)
+                    full = store.qdrant.get_memory(mem_id, user_id=user_id)
+                    if full:
+                        store.qdrant.touch_memory(mem_id, user_id=user_id)
+                        person = full.person or "?"
                         results.append(
-                            f"[{mem.gate.value}] ({mem.created:%Y-%m-%d}, {person}) "
-                            f"{mem.content}\n  id: {mem.id}"
+                            f"[{full.gate.value}, text] "
+                            f"({full.created:%Y-%m-%d}, {person}) "
+                            f"{full.content}\n  id: {full.id}"
                         )
-            except Exception as e:
-                log.warning("FTS fallback failed: %s", e)
+        except Exception as e:
+            log.warning("text search failed: %s", e)
 
     # 3. Graph traversal for sparse results
     if len(results) < 3:
         for mid in list(seen_ids)[:2]:
-            related = store.db.find_related(
+            related = store.qdrant.find_related(
                 mid, depth=2, user_id=user_id
             )
             for rel in related:
                 rid = rel["id"]
                 if rid not in seen_ids:
                     seen_ids.add(rid)
+                    preview = rel.get("content", "")[:80]
                     results.append(
                         f"[graph: {rel['relation']}] "
-                        f"{rel['preview']} (id: {rid})"
+                        f"{preview} (id: {rid})"
                     )
 
     if not results:

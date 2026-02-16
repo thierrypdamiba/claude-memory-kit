@@ -112,6 +112,31 @@ class TestGetJwkClient:
         result = auth_module._get_jwk_client()
         assert result is None
 
+    def test_lock_double_check_returns_cached(self, monkeypatch):
+        """Double-check inside lock returns cached client if refreshed by another thread."""
+        mock_client = MagicMock()
+        # Set expired cache so the outer check passes
+        monkeypatch.setattr(auth_module, "_jwk_client", None)
+        monkeypatch.setattr(auth_module, "_jwk_cache_time", 0)
+        monkeypatch.setenv("CLERK_FRONTEND_API", "my-app.clerk.accounts.dev")
+        # Simulate another thread refreshing the client between outer check and lock acquisition
+        original_lock = auth_module._jwk_lock
+
+        class FakeContext:
+            def __enter__(self_inner):
+                original_lock.__enter__()
+                # Simulate another thread having refreshed the client
+                auth_module._jwk_client = mock_client
+                auth_module._jwk_cache_time = time.time()
+                return self_inner
+
+            def __exit__(self_inner, *args):
+                return original_lock.__exit__(*args)
+
+        monkeypatch.setattr(auth_module, "_jwk_lock", FakeContext())
+        result = auth_module._get_jwk_client()
+        assert result is mock_client
+
 
 class TestVerifyClerkToken:
     """Cover lines 83-105: verify_clerk_token success, expired, invalid, and no client."""
@@ -335,69 +360,53 @@ class TestOptionalAuthEnabled:
 class TestStoreInit:
     """Cover Store class: __init__, init, count_user_data, migrate_user_data."""
 
-    @patch("claude_memory_kit.store.VectorStore")
+    @patch("claude_memory_kit.store.QdrantStore")
     @patch("claude_memory_kit.store.SqliteStore")
-    def test_store_constructor(self, mock_sqlite_cls, mock_vector_cls):
+    def test_store_constructor(self, mock_sqlite_cls, mock_qdrant_cls):
         from claude_memory_kit.store import Store
 
         store = Store("/tmp/test-store")
         assert store.path == "/tmp/test-store"
         mock_sqlite_cls.assert_called_once_with("/tmp/test-store")
-        mock_vector_cls.assert_called_once_with("/tmp/test-store")
-        assert store.db is mock_sqlite_cls.return_value
-        assert store.vectors is mock_vector_cls.return_value
+        mock_qdrant_cls.assert_called_once_with("/tmp/test-store")
+        assert store.auth_db is mock_sqlite_cls.return_value
+        assert store.qdrant is mock_qdrant_cls.return_value
 
     @pytest.mark.asyncio
-    @patch("claude_memory_kit.store.VectorStore")
+    @patch("claude_memory_kit.store.QdrantStore")
     @patch("claude_memory_kit.store.SqliteStore")
-    async def test_store_init(self, mock_sqlite_cls, mock_vector_cls):
+    async def test_store_init(self, mock_sqlite_cls, mock_qdrant_cls):
         from claude_memory_kit.store import Store
 
         store = Store("/tmp/test-store")
         await store.init()
-        store.db.migrate.assert_called_once()
-        store.vectors.ensure_collection.assert_called_once()
+        store.auth_db.migrate.assert_called_once()
+        store.qdrant.ensure_collection.assert_called_once()
 
-    @patch("claude_memory_kit.store.VectorStore")
+    @patch("claude_memory_kit.store.QdrantStore")
     @patch("claude_memory_kit.store.SqliteStore")
-    def test_count_user_data(self, mock_sqlite_cls, mock_vector_cls):
+    def test_count_user_data(self, mock_sqlite_cls, mock_qdrant_cls):
         from claude_memory_kit.store import Store
 
         store = Store("/tmp/test-store")
-        store.db.count_user_data.return_value = {
-            "memories": 5,
-            "journal": 3,
-            "edges": 2,
-            "archive": 1,
-            "rules": 0,
-            "identity": 1,
-            "onboarding": 0,
-        }
+        store.qdrant.count_memories.return_value = 5
         counts = store.count_user_data("user_1")
-        store.db.count_user_data.assert_called_once_with("user_1")
+        store.qdrant.count_memories.assert_called_once_with(user_id="user_1")
         assert counts["memories"] == 5
-        assert counts["total"] == 5 + 3 + 2 + 1  # memories + journal + edges + archive
+        assert counts["total"] == 5
 
-    @patch("claude_memory_kit.store.VectorStore")
+    @patch("claude_memory_kit.store.QdrantStore")
     @patch("claude_memory_kit.store.SqliteStore")
-    def test_migrate_user_data(self, mock_sqlite_cls, mock_vector_cls):
+    def test_migrate_user_data(self, mock_sqlite_cls, mock_qdrant_cls):
         from claude_memory_kit.store import Store
 
         store = Store("/tmp/test-store")
-        store.db.migrate_user_data.return_value = {
-            "memories": 3,
-            "journal": 2,
-            "edges": 1,
-            "archive": 0,
-            "identity": 1,
-        }
-        store.vectors.migrate_user_id.return_value = 5
+        store.qdrant.migrate_user_id.return_value = 5
 
         result = store.migrate_user_data("old_user", "new_user")
-        store.db.migrate_user_data.assert_called_once_with("old_user", "new_user")
-        store.vectors.migrate_user_id.assert_called_once_with("old_user", "new_user")
-        assert result["memories"] == 3
-        assert result["vectors"] == 5
+        store.qdrant.migrate_user_id.assert_called_once_with("old_user", "new_user")
+        assert result["memories"] == 5
+        assert result["total"] == 5
 
 
 # ===========================================================================

@@ -7,7 +7,8 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request, Depends
+import httpx
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,7 @@ log = logging.getLogger("cmk")
 
 GATE_PATTERN = r"^(behavioral|relational|epistemic|promissory|correction)$"
 ENFORCEMENT_PATTERN = r"^(suggest|enforce|block)$"
+API_VERSION = 1
 
 
 @asynccontextmanager
@@ -47,6 +49,12 @@ async def lifespan(app: FastAPI):
     else:
         log.info("running without auth (local mode)")
 
+    # Initialize store in lifespan, not as a global singleton
+    store = Store(get_store_path())
+    store.auth_db.migrate()
+    store.qdrant.ensure_collection()
+    app.state.store = store
+
     yield
 
 
@@ -65,25 +73,18 @@ async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-API-Version"] = str(API_VERSION)
     return response
 
 
-_store: Store | None = None
-
-
 def _get_store() -> Store:
-    global _store
-    if _store is None:
-        _store = Store(get_store_path())
-        _store.db.migrate()
-        _store.vectors.ensure_collection()
-    return _store
+    return app.state.store
 
 
 async def _auth(request: Request) -> dict:
     """Resolve current user. Local mode returns local user."""
     store = _get_store()
-    return await get_current_user(request, db=store.db)
+    return await get_current_user(request, db=store.auth_db)
 
 
 class CreateMemoryRequest(BaseModel):
@@ -137,48 +138,111 @@ class BulkPrivateRequest(BaseModel):
     level: str | None = Field(None, pattern=SENSITIVITY_PATTERN)
 
 
-# ---- Public ----
+class SynthesizeRequest(BaseModel):
+    system: str = Field(..., max_length=50_000)
+    prompt: str = Field(..., max_length=100_000)
+    max_tokens: int = Field(4096, ge=1, le=8192)
+
+
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6")
+
+
+# ---- Public (no prefix) ----
 
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
 
 
+# ---- API Router (mounted at /api and /api/v1) ----
+
+router = APIRouter()
+
+
 # ---- Auth ----
 
-@app.get("/api/auth/me")
+@router.get("/auth/me")
 async def auth_me(user: dict = Depends(_auth)):
     return {"user": user}
 
 
-@app.post("/api/keys")
+@router.post("/keys")
 async def create_key(
     req: CreateKeyRequest, user: dict = Depends(_auth)
 ):
     store = _get_store()
-    result = create_api_key(store.db, user["id"], req.name)
+    result = create_api_key(store.auth_db, user["id"], req.name)
     return {"key": result}
 
 
-@app.get("/api/keys")
+@router.get("/keys")
 async def get_keys(user: dict = Depends(_auth)):
     store = _get_store()
-    keys = list_keys(store.db, user["id"])
+    keys = list_keys(store.auth_db, user["id"])
     return {"keys": keys}
 
 
-@app.delete("/api/keys/{key_id}")
+@router.delete("/keys/{key_id}")
 async def delete_key(key_id: str, user: dict = Depends(_auth)):
     store = _get_store()
-    ok = revoke_key(store.db, key_id, user["id"])
+    ok = revoke_key(store.auth_db, key_id, user["id"])
     if not ok:
         raise HTTPException(404, "key not found")
     return {"revoked": True}
 
 
+# ---- Synthesis Proxy ----
+
+@router.post("/synthesize")
+async def synthesize(req: SynthesizeRequest, user: dict = Depends(_auth)):
+    """Proxy Anthropic API calls for cloud users.
+
+    Accepts a system prompt and user prompt, calls Anthropic using the
+    server-side API key, and returns the generated text. This lets
+    users run synthesis features without their own Anthropic key.
+    """
+    server_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not server_key or server_key.startswith("<"):
+        raise HTTPException(
+            503,
+            "Synthesis unavailable: server ANTHROPIC_API_KEY not configured.",
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                ANTHROPIC_API_URL,
+                headers={
+                    "x-api-key": server_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": ANTHROPIC_MODEL,
+                    "max_tokens": req.max_tokens,
+                    "system": req.system,
+                    "messages": [{"role": "user", "content": req.prompt}],
+                },
+            )
+    except httpx.HTTPError as e:
+        log.error("anthropic proxy request failed: %s", e)
+        raise HTTPException(502, f"Upstream request failed: {e}")
+
+    if resp.status_code != 200:
+        log.error(
+            "anthropic api returned %d: %s", resp.status_code, resp.text[:500]
+        )
+        raise HTTPException(502, f"Upstream returned {resp.status_code}")
+
+    data = resp.json()
+    text = data["content"][0]["text"]
+    return {"text": text}
+
+
 # ---- Memories ----
 
-@app.get("/api/memories")
+@router.get("/memories")
 async def list_memories(
     limit: int = 50, offset: int = 0,
     gate: str | None = None,
@@ -189,14 +253,14 @@ async def list_memories(
     limit = min(max(1, limit), 500)
     offset = max(0, offset)
     store = _get_store()
-    memories = store.db.list_memories(
+    memories = store.qdrant.list_memories(
         limit, offset, user_id=user["id"],
         gate=gate, person=person, project=project,
     )
     return {"memories": [m.model_dump() for m in memories]}
 
 
-@app.post("/api/memories")
+@router.post("/memories")
 async def create_memory(
     req: CreateMemoryRequest, user: dict = Depends(_auth)
 ):
@@ -208,21 +272,21 @@ async def create_memory(
     return {"result": result}
 
 
-@app.get("/api/memories/{id}")
+@router.get("/memories/{id}")
 async def get_memory(id: str, user: dict = Depends(_auth)):
     store = _get_store()
-    mem = store.db.get_memory(id, user_id=user["id"])
+    mem = store.qdrant.get_memory(id, user_id=user["id"])
     if not mem:
         raise HTTPException(404, "memory not found")
     return mem.model_dump()
 
 
-@app.patch("/api/memories/{id}")
+@router.patch("/memories/{id}")
 async def update_memory(
     id: str, req: UpdateMemoryRequest, user: dict = Depends(_auth)
 ):
     store = _get_store()
-    mem = store.db.get_memory(id, user_id=user["id"])
+    mem = store.qdrant.get_memory(id, user_id=user["id"])
     if not mem:
         raise HTTPException(404, "memory not found")
 
@@ -230,24 +294,11 @@ async def update_memory(
     if not updates:
         return {"result": "no changes"}
 
-    store.db.update_memory(id, user_id=user["id"], **updates)
-
-    # Re-embed if content changed
-    if "content" in updates:
-        updated_mem = store.db.get_memory(id, user_id=user["id"])
-        if updated_mem:
-            store.vectors.upsert(
-                updated_mem.id,
-                updated_mem.content,
-                updated_mem.person,
-                updated_mem.project,
-                user_id=user["id"],
-            )
-
+    store.qdrant.update_memory(id, user_id=user["id"], **updates)
     return {"result": "updated"}
 
 
-@app.delete("/api/memories/{id}")
+@router.delete("/memories/{id}")
 async def delete_memory(
     id: str, reason: str = "", user: dict = Depends(_auth)
 ):
@@ -260,29 +311,29 @@ async def delete_memory(
 
 # ---- Pin ----
 
-@app.post("/api/memories/{id}/pin")
+@router.post("/memories/{id}/pin")
 async def pin_memory(id: str, user: dict = Depends(_auth)):
     store = _get_store()
-    mem = store.db.get_memory(id, user_id=user["id"])
+    mem = store.qdrant.get_memory(id, user_id=user["id"])
     if not mem:
         raise HTTPException(404, "memory not found")
-    store.db.set_pinned(id, True, user_id=user["id"])
+    store.qdrant.set_pinned(id, True, user_id=user["id"])
     return {"result": "pinned"}
 
 
-@app.delete("/api/memories/{id}/pin")
+@router.delete("/memories/{id}/pin")
 async def unpin_memory(id: str, user: dict = Depends(_auth)):
     store = _get_store()
-    mem = store.db.get_memory(id, user_id=user["id"])
+    mem = store.qdrant.get_memory(id, user_id=user["id"])
     if not mem:
         raise HTTPException(404, "memory not found")
-    store.db.set_pinned(id, False, user_id=user["id"])
+    store.qdrant.set_pinned(id, False, user_id=user["id"])
     return {"result": "unpinned"}
 
 
 # ---- Search ----
 
-@app.post("/api/search")
+@router.post("/search")
 async def search(
     req: SearchRequest, user: dict = Depends(_auth)
 ):
@@ -293,14 +344,14 @@ async def search(
 
 # ---- Identity ----
 
-@app.get("/api/identity")
+@router.get("/identity")
 async def get_identity(user: dict = Depends(_auth)):
     store = _get_store()
     result = await do_identity(store, user_id=user["id"])
     return {"identity": result}
 
 
-@app.put("/api/identity")
+@router.put("/identity")
 async def update_identity(
     req: UpdateIdentityRequest, user: dict = Depends(_auth)
 ):
@@ -311,27 +362,27 @@ async def update_identity(
         content=req.content,
         last_updated=datetime.now(timezone.utc),
     )
-    store.db.set_identity(card, user_id=user["id"])
+    store.qdrant.set_identity(card, user_id=user["id"])
     return {"result": "updated"}
 
 
-@app.get("/api/graph/{id}")
+@router.get("/graph/{id}")
 async def get_graph(id: str, user: dict = Depends(_auth)):
     store = _get_store()
-    related = store.db.find_related(
+    related = store.qdrant.find_related(
         id, depth=2, user_id=user["id"]
     )
     return {"related": related}
 
 
-@app.post("/api/reflect")
+@router.post("/reflect")
 async def trigger_reflect(user: dict = Depends(_auth)):
     store = _get_store()
     result = await do_reflect(store, user_id=user["id"])
     return {"result": result}
 
 
-@app.get("/api/scan")
+@router.get("/scan")
 async def scan_memories(user: dict = Depends(_auth)):
     """Scan memories for PII and sensitive data patterns."""
     store = _get_store()
@@ -341,7 +392,7 @@ async def scan_memories(user: dict = Depends(_auth)):
 
 # ---- Privacy / Sensitivity ----
 
-@app.get("/api/private")
+@router.get("/private")
 async def list_private(
     level: str = "flagged",
     limit: int = 50, offset: int = 0,
@@ -351,19 +402,19 @@ async def list_private(
     limit = min(max(1, limit), 500)
     offset = max(0, offset)
     store = _get_store()
-    memories = store.db.list_memories_by_sensitivity(
+    memories = store.qdrant.list_memories_by_sensitivity(
         level if level != "flagged" else "flagged",
         limit, offset, user_id=user["id"],
     )
     return {"memories": [m.model_dump() for m in memories]}
 
 
-@app.get("/api/privacy-stats")
+@router.get("/privacy-stats")
 async def privacy_stats(user: dict = Depends(_auth)):
     """Get sensitivity classification counts."""
     store = _get_store()
-    counts = store.db.count_by_sensitivity(user_id=user["id"])
-    total = store.db.count_memories(user_id=user["id"])
+    counts = store.qdrant.count_by_sensitivity(user_id=user["id"])
+    total = store.qdrant.count_memories(user_id=user["id"])
     return {
         "total": total,
         "safe": counts.get("safe", 0),
@@ -373,7 +424,7 @@ async def privacy_stats(user: dict = Depends(_auth)):
     }
 
 
-@app.post("/api/classify")
+@router.post("/classify")
 async def trigger_classify(user: dict = Depends(_auth)):
     """Batch-classify all unclassified memories."""
     store = _get_store()
@@ -381,7 +432,7 @@ async def trigger_classify(user: dict = Depends(_auth)):
     return {"result": result}
 
 
-@app.patch("/api/memories/{id}/sensitivity")
+@router.patch("/memories/{id}/sensitivity")
 async def update_sensitivity(
     id: str, req: ReclassifyRequest, user: dict = Depends(_auth)
 ):
@@ -391,7 +442,7 @@ async def update_sensitivity(
     return {"result": result}
 
 
-@app.post("/api/private/bulk")
+@router.post("/private/bulk")
 async def bulk_private_action(
     req: BulkPrivateRequest, user: dict = Depends(_auth)
 ):
@@ -401,7 +452,7 @@ async def bulk_private_action(
     processed = 0
 
     for mem_id in req.ids:
-        mem = store.db.get_memory(mem_id, user_id=uid)
+        mem = store.qdrant.get_memory(mem_id, user_id=uid)
         if not mem:
             continue
 
@@ -410,21 +461,14 @@ async def bulk_private_action(
             processed += 1
 
         elif req.action == "redact":
-            store.db.update_memory(mem_id, user_id=uid, content="[REDACTED]")
-            try:
-                store.vectors.upsert(
-                    mem_id, "[REDACTED]", mem.person, mem.project,
-                    user_id=uid,
-                )
-            except Exception:
-                pass
-            store.db.update_sensitivity(
+            store.qdrant.update_memory(mem_id, user_id=uid, content="[REDACTED]")
+            store.qdrant.update_sensitivity(
                 mem_id, "safe", "content redacted by user", user_id=uid,
             )
             processed += 1
 
         elif req.action == "reclassify" and req.level:
-            store.db.update_sensitivity(
+            store.qdrant.update_sensitivity(
                 mem_id, req.level, "bulk reclassified by user", user_id=uid,
             )
             processed += 1
@@ -432,46 +476,46 @@ async def bulk_private_action(
     return {"result": f"{req.action}: {processed}/{len(req.ids)} memories processed"}
 
 
-@app.get("/api/stats")
+@router.get("/stats")
 async def get_stats(user: dict = Depends(_auth)):
     store = _get_store()
     uid = user["id"]
     return {
-        "total": store.db.count_memories(user_id=uid),
-        "by_gate": store.db.count_by_gate(user_id=uid),
-        "has_identity": store.db.get_identity(user_id=uid) is not None,
+        "total": store.qdrant.count_memories(user_id=uid),
+        "by_gate": store.qdrant.count_by_gate(user_id=uid),
+        "has_identity": store.qdrant.get_identity(user_id=uid) is not None,
     }
 
 
 # ---- Rules ----
 
-@app.get("/api/rules")
+@router.get("/rules")
 async def list_rules(user: dict = Depends(_auth)):
     store = _get_store()
-    rules = store.db.list_rules(user_id=user["id"])
+    rules = store.qdrant.list_rules(user_id=user["id"])
     return {"rules": rules}
 
 
-@app.post("/api/rules")
+@router.post("/rules")
 async def create_rule(
     req: CreateRuleRequest, user: dict = Depends(_auth)
 ):
     store = _get_store()
     rule_id = str(uuid.uuid4())[:12]
-    store.db.insert_rule(
+    store.qdrant.insert_rule(
         rule_id, user["id"], req.scope,
         req.condition, req.enforcement,
     )
-    rule = store.db.get_rule(rule_id, user_id=user["id"])
+    rule = store.qdrant.get_rule(rule_id, user_id=user["id"])
     return {"rule": rule}
 
 
-@app.put("/api/rules/{rule_id}")
+@router.put("/rules/{rule_id}")
 async def update_rule(
     rule_id: str, req: UpdateRuleRequest, user: dict = Depends(_auth)
 ):
     store = _get_store()
-    existing = store.db.get_rule(rule_id, user_id=user["id"])
+    existing = store.qdrant.get_rule(rule_id, user_id=user["id"])
     if not existing:
         raise HTTPException(404, "rule not found")
 
@@ -479,14 +523,14 @@ async def update_rule(
     if not updates:
         return {"result": "no changes"}
 
-    store.db.update_rule(rule_id, user_id=user["id"], **updates)
+    store.qdrant.update_rule(rule_id, user_id=user["id"], **updates)
     return {"result": "updated"}
 
 
-@app.delete("/api/rules/{rule_id}")
+@router.delete("/rules/{rule_id}")
 async def delete_rule(rule_id: str, user: dict = Depends(_auth)):
     store = _get_store()
-    ok = store.db.delete_rule(rule_id, user_id=user["id"])
+    ok = store.qdrant.delete_rule(rule_id, user_id=user["id"])
     if not ok:
         raise HTTPException(404, "rule not found")
     return {"result": "deleted"}
@@ -494,7 +538,7 @@ async def delete_rule(rule_id: str, user: dict = Depends(_auth)):
 
 # ---- Mode ----
 
-@app.get("/api/mode")
+@router.get("/mode")
 async def get_mode():
     cloud = is_cloud_mode()
     return {
@@ -505,7 +549,7 @@ async def get_mode():
 
 # ---- Setup ----
 
-@app.post("/api/setup/init-key")
+@router.post("/setup/init-key")
 async def setup_init_key(user: dict = Depends(_auth)):
     """Generate an API key and return the cmk init command."""
     store = _get_store()
@@ -514,7 +558,7 @@ async def setup_init_key(user: dict = Depends(_auth)):
     if uid == "local":
         raise HTTPException(400, "must be authenticated")
 
-    result = create_api_key(store.db, uid, "cmk-init")
+    result = create_api_key(store.auth_db, uid, "cmk-init")
     raw_key = result["key"]
     return {
         "key": raw_key,
@@ -531,7 +575,7 @@ async def setup_init_key(user: dict = Depends(_auth)):
 
 # ---- Data Migration ----
 
-@app.get("/api/local-data-check")
+@router.get("/local-data-check")
 async def local_data_check(user: dict = Depends(_auth)):
     """Check if unclaimed local data exists."""
     store = _get_store()
@@ -543,7 +587,7 @@ async def local_data_check(user: dict = Depends(_auth)):
     }
 
 
-@app.post("/api/claim-local")
+@router.post("/claim-local")
 async def claim_local(user: dict = Depends(_auth)):
     """Claim local data for the authenticated user."""
     store = _get_store()
@@ -558,3 +602,8 @@ async def claim_local(user: dict = Depends(_auth)):
 
     result = store.migrate_user_data("local", uid)
     return {"migrated": result, "message": "local data claimed"}
+
+
+# Mount router at /api (backward compat) and /api/v1
+app.include_router(router, prefix="/api")
+app.include_router(router, prefix="/api/v1")

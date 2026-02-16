@@ -19,9 +19,6 @@ from .tools.checkpoint import do_checkpoint, CHECKPOINT_GUIDANCE, CHECKPOINT_EVE
 
 log = logging.getLogger("cmk")
 
-# Track saves for auto-reflect and auto-checkpoint
-_save_count = 0
-_checkpoint_count = 0
 _REFLECT_EVERY = 15
 
 
@@ -121,7 +118,7 @@ def _build_instructions(store: Store, user_id: str) -> str:
         "You have persistent memory via Claude Memory Kit (CMK).",
         "You WILL forget everything between sessions unless you save it.",
         "",
-        "4 tools: save, search, forget, checkpoint.",
+        "4 tools: remember_this, recall_memories, forget_memory, save_checkpoint.",
         "",
         "PROACTIVE SAVING (do this automatically, user should not have to ask):",
         "- User states a preference or opinion: save it.",
@@ -145,21 +142,21 @@ def _build_instructions(store: Store, user_id: str) -> str:
     ]
 
     # Load identity card if it exists
-    identity = store.db.get_identity(user_id=user_id)
+    identity = store.qdrant.get_identity(user_id=user_id)
     if identity:
         parts.append("")
         parts.append("--- Who I am ---")
         parts.append(identity.content)
 
     # Load latest checkpoint (where we left off last session)
-    checkpoint = store.db.latest_checkpoint(user_id=user_id)
+    checkpoint = store.qdrant.latest_checkpoint(user_id=user_id)
     if checkpoint:
         parts.append("")
         parts.append("--- Last session checkpoint ---")
         parts.append(checkpoint["content"])
 
     # Load recent context (last few journal entries, excluding checkpoints)
-    recent = store.db.recent_journal(days=2, user_id=user_id)
+    recent = store.qdrant.recent_journal(days=2, user_id=user_id)
     if recent:
         non_checkpoint = [e for e in recent if e.get("gate") != "checkpoint"]
         if non_checkpoint:
@@ -171,23 +168,25 @@ def _build_instructions(store: Store, user_id: str) -> str:
     return "\n".join(parts)
 
 
-# Tool definitions: 3 tools, minimal required params
+# Tool definitions with natural-language names and descriptions
 TOOL_DEFS = [
     Tool(
-        name="save",
+        name="remember_this",
         description=(
-            "Save something to memory. Call this PROACTIVELY whenever "
-            "you learn something worth keeping: preferences, facts about people, "
-            "commitments, corrections, decisions, surprises. "
-            "Classification and sensitivity are auto-detected. "
-            "Don't ask permission. Just save."
+            "Remember something about the user or their work. "
+            "Call this whenever you learn a preference, commitment, "
+            "correction, or fact worth keeping. "
+            "You don't need permission. Just remember it."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "What to remember. Write naturally.",
+                    "description": (
+                        "What you want to remember. "
+                        "Write it like you'd tell a colleague."
+                    ),
                 },
                 "person": {
                     "type": "string",
@@ -202,48 +201,52 @@ TOOL_DEFS = [
         },
     ),
     Tool(
-        name="search",
+        name="recall_memories",
         description=(
-            "Search memories. Hybrid search: keywords + semantic + graph. "
-            "Use natural language or keywords."
+            "Look up what you know about a topic. "
+            "Searches across all saved memories using keywords and meaning. "
+            "Use this at the start of sessions and whenever past context might help."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "What to search for",
+                    "description": "What you're looking for. Use natural language or keywords.",
                 },
             },
             "required": ["query"],
         },
     ),
     Tool(
-        name="forget",
+        name="forget_memory",
         description=(
-            "Remove a memory. Requires the memory ID "
-            "(from search results) and a reason why."
+            "Remove a specific memory. "
+            "Use when the user asks you to forget something, "
+            "or when information is outdated or wrong. "
+            "Requires the memory ID from search results and a reason."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "Memory ID to forget",
+                    "description": "The memory ID (from search results) to remove.",
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Why this should be forgotten",
+                    "description": "Why this memory should be removed.",
                 },
             },
             "required": ["id", "reason"],
         },
     ),
     Tool(
-        name="checkpoint",
+        name="save_checkpoint",
         description=(
-            "Save a session checkpoint. Called automatically every 8 saves, "
-            "or call manually when finishing complex work. "
+            "Save a snapshot of the current session. "
+            "Captures what you're working on, key decisions, and next steps. "
+            "Called automatically, but you can also call it when finishing complex work. "
             + CHECKPOINT_GUIDANCE
         ),
         inputSchema={
@@ -261,20 +264,27 @@ TOOL_DEFS = [
     ),
 ]
 
-# Keep legacy tool names as aliases for backwards compatibility
+# Legacy and shorthand aliases all resolve to new names
 LEGACY_ALIASES = {
-    "remember": "save",
-    "recall": "search",
-    "prime": "search",
+    "save": "remember_this",
+    "remember": "remember_this",
+    "search": "recall_memories",
+    "recall": "recall_memories",
+    "prime": "recall_memories",
+    "forget": "forget_memory",
+    "checkpoint": "save_checkpoint",
 }
 
 
 def create_server() -> Server:
     store_path = get_store_path()
     store = Store(store_path)
-    store.db.migrate()
-    store.vectors.ensure_collection()
+    store.auth_db.migrate()
+    store.qdrant.ensure_collection()
     user_id = get_user_id()
+
+    # Counters live in the closure, not as module globals
+    counters = {"save": 0, "checkpoint": 0}
 
     instructions = _build_instructions(store, user_id)
     server = Server("claude-memory-kit", instructions=instructions)
@@ -288,7 +298,9 @@ def create_server() -> Server:
         # Resolve legacy aliases
         resolved = LEGACY_ALIASES.get(name, name)
         try:
-            result = await _dispatch(store, resolved, arguments, user_id)
+            result = await _dispatch(
+                store, resolved, arguments, user_id, counters,
+            )
         except Exception as e:
             log.error("tool %s failed: %s", name, e)
             result = f"Error: {e}"
@@ -297,10 +309,11 @@ def create_server() -> Server:
     return server
 
 
-async def _dispatch(store: Store, name: str, args: dict, user_id: str) -> str:
-    global _save_count, _checkpoint_count
-
-    if name == "save":
+async def _dispatch(
+    store: Store, name: str, args: dict, user_id: str,
+    counters: dict,
+) -> str:
+    if name == "remember_this":
         text = args["text"]
         gate = _auto_gate(text)
         person = args.get("person")
@@ -318,12 +331,12 @@ async def _dispatch(store: Store, name: str, args: dict, user_id: str) -> str:
             store, text, gate, person, project, user_id=user_id,
         )
 
-        _save_count += 1
-        _checkpoint_count += 1
+        counters["save"] += 1
+        counters["checkpoint"] += 1
 
         # Auto-reflect after N saves
-        if _save_count >= _REFLECT_EVERY:
-            _save_count = 0
+        if counters["save"] >= _REFLECT_EVERY:
+            counters["save"] = 0
             try:
                 reflect_result = await do_reflect(store, user_id=user_id)
                 log.info("auto-reflect: %s", reflect_result)
@@ -331,23 +344,23 @@ async def _dispatch(store: Store, name: str, args: dict, user_id: str) -> str:
                 log.warning("auto-reflect failed: %s", e)
 
         # Auto-checkpoint: prompt to save session state
-        if _checkpoint_count >= CHECKPOINT_EVERY:
-            _checkpoint_count = 0
+        if counters["checkpoint"] >= CHECKPOINT_EVERY:
+            counters["checkpoint"] = 0
             result += (
                 "\n\n[auto-checkpoint] You've saved 8 memories this session. "
-                "Call the checkpoint tool with a structured summary of: "
+                "Call save_checkpoint with a structured summary of: "
                 "current task, decisions made, what didn't work, and next steps."
             )
 
         return result
 
-    if name == "checkpoint":
+    if name == "save_checkpoint":
         return await do_checkpoint(store, args["summary"], user_id=user_id)
 
-    if name == "search":
+    if name == "recall_memories":
         return await do_recall(store, args["query"], user_id=user_id)
 
-    if name == "forget":
+    if name == "forget_memory":
         return await do_forget(
             store, args["id"], args["reason"], user_id=user_id,
         )

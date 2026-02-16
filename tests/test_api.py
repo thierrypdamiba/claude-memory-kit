@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,17 +47,13 @@ def _make_memory(
 
 
 @pytest.fixture(autouse=True)
-def setup_store(db, monkeypatch):
+def setup_store(qdrant_db, db, monkeypatch):
     store = MagicMock()
-    store.db = db
-    store.vectors = MagicMock()
-    store.vectors.search.return_value = []
-    store.vectors.upsert.return_value = None
-    store.vectors.delete.return_value = None
+    store.qdrant = qdrant_db
+    store.auth_db = db
     store.count_user_data.return_value = {"total": 0, "memories": 0}
     store.migrate_user_data.return_value = {"memories": 0}
-    monkeypatch.setattr(app_module, "_store", store)
-    monkeypatch.setattr(app_module, "_get_store", lambda: store)
+    app.state.store = store
     return store
 
 
@@ -66,6 +63,19 @@ def test_healthz(client):
     resp = client.get("/healthz")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
+
+
+def test_api_version_header(client):
+    """All responses include X-API-Version header."""
+    resp = client.get("/healthz")
+    assert resp.headers["X-API-Version"] == "1"
+
+
+def test_v1_routes_work(client):
+    """Routes at /api/v1 mirror /api routes."""
+    resp = client.get("/api/v1/stats")
+    assert resp.status_code == 200
+    assert "total" in resp.json()
 
 
 # ---- Auth ----
@@ -144,9 +154,9 @@ def test_create_memory_missing_content(client):
     assert resp.status_code == 422
 
 
-def test_get_memory(client, db):
+def test_get_memory(client, qdrant_db):
     mem = _make_memory(id="mem_get_001")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     resp = client.get("/api/memories/mem_get_001")
     assert resp.status_code == 200
     assert resp.json()["id"] == "mem_get_001"
@@ -157,9 +167,9 @@ def test_get_memory_not_found(client):
     assert resp.status_code == 404
 
 
-def test_update_memory(client, db, setup_store):
+def test_update_memory(client, qdrant_db, setup_store):
     mem = _make_memory(id="mem_upd_001")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     resp = client.patch("/api/memories/mem_upd_001", json={
         "content": "updated content",
     })
@@ -167,9 +177,9 @@ def test_update_memory(client, db, setup_store):
     assert resp.json()["result"] == "updated"
 
 
-def test_update_memory_no_changes(client, db):
+def test_update_memory_no_changes(client, qdrant_db):
     mem = _make_memory(id="mem_upd_002")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     resp = client.patch("/api/memories/mem_upd_002", json={})
     assert resp.status_code == 200
     assert resp.json()["result"] == "no changes"
@@ -182,9 +192,9 @@ def test_update_memory_not_found(client):
     assert resp.status_code == 404
 
 
-def test_delete_memory(client, db, setup_store):
+def test_delete_memory(client, qdrant_db, setup_store):
     mem = _make_memory(id="mem_del_001")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     with patch("claude_memory_kit.api.app.do_forget", new_callable=AsyncMock) as mock_forget:
         mock_forget.return_value = "forgotten"
         resp = client.delete("/api/memories/mem_del_001")
@@ -192,9 +202,9 @@ def test_delete_memory(client, db, setup_store):
         assert resp.json()["result"] == "forgotten"
 
 
-def test_list_memories_with_filters(client, db):
-    db.insert_memory(_make_memory(id="m1", gate=Gate.behavioral, person="Alice"))
-    db.insert_memory(_make_memory(id="m2", gate=Gate.epistemic, person="Bob"))
+def test_list_memories_with_filters(client, qdrant_db):
+    qdrant_db.insert_memory(_make_memory(id="m1", gate=Gate.behavioral, person="Alice"))
+    qdrant_db.insert_memory(_make_memory(id="m2", gate=Gate.epistemic, person="Bob"))
     resp = client.get("/api/memories?gate=behavioral")
     assert resp.status_code == 200
     mems = resp.json()["memories"]
@@ -203,18 +213,18 @@ def test_list_memories_with_filters(client, db):
 
 # ---- Pin ----
 
-def test_pin_memory(client, db):
+def test_pin_memory(client, qdrant_db):
     mem = _make_memory(id="mem_pin_001")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     resp = client.post("/api/memories/mem_pin_001/pin")
     assert resp.status_code == 200
     assert resp.json()["result"] == "pinned"
 
 
-def test_unpin_memory(client, db):
+def test_unpin_memory(client, qdrant_db):
     mem = _make_memory(id="mem_unpin_001")
-    db.insert_memory(mem)
-    db.set_pinned("mem_unpin_001", True)
+    qdrant_db.insert_memory(mem)
+    qdrant_db.set_pinned("mem_unpin_001", True)
     resp = client.delete("/api/memories/mem_unpin_001/pin")
     assert resp.status_code == 200
     assert resp.json()["result"] == "unpinned"
@@ -255,19 +265,19 @@ def test_get_identity(client, setup_store):
         assert resp.json()["identity"] == "identity card content"
 
 
-def test_put_identity(client, db):
+def test_put_identity(client, qdrant_db):
     resp = client.put("/api/identity", json={"content": "I am a developer"})
     assert resp.status_code == 200
     assert resp.json()["result"] == "updated"
     # Verify the identity was saved
-    card = db.get_identity(user_id="local")
+    card = qdrant_db.get_identity(user_id="local")
     assert card is not None
     assert card.content == "I am a developer"
 
 
 # ---- Graph ----
 
-def test_get_graph(client, db):
+def test_get_graph(client, qdrant_db):
     resp = client.get("/api/graph/some-id")
     assert resp.status_code == 200
     assert "related" in resp.json()
@@ -295,21 +305,21 @@ def test_scan_memories(client, setup_store):
 
 # ---- Privacy / Sensitivity ----
 
-def test_list_private(client, db):
+def test_list_private(client, qdrant_db):
     resp = client.get("/api/private")
     assert resp.status_code == 200
     assert "memories" in resp.json()
 
 
-def test_list_private_with_level(client, db):
+def test_list_private_with_level(client, qdrant_db):
     mem = _make_memory(id="priv_001", content="salary info")
-    db.insert_memory(mem)
-    db.update_sensitivity("priv_001", "sensitive", "salary info")
+    qdrant_db.insert_memory(mem)
+    qdrant_db.update_sensitivity("priv_001", "sensitive", "salary info")
     resp = client.get("/api/private?level=sensitive")
     assert resp.status_code == 200
 
 
-def test_privacy_stats(client, db):
+def test_privacy_stats(client, qdrant_db):
     resp = client.get("/api/privacy-stats")
     assert resp.status_code == 200
     data = resp.json()
@@ -328,9 +338,9 @@ def test_trigger_classify(client, setup_store):
         assert "result" in resp.json()
 
 
-def test_update_sensitivity(client, db, setup_store):
+def test_update_sensitivity(client, qdrant_db, setup_store):
     mem = _make_memory(id="sens_001")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     with patch("claude_memory_kit.api.app.reclassify_memory", new_callable=AsyncMock) as mock_rcl:
         mock_rcl.return_value = "Reclassified sens_001 as critical."
         resp = client.patch("/api/memories/sens_001/sensitivity", json={
@@ -346,9 +356,9 @@ def test_update_sensitivity_bad_level(client):
     assert resp.status_code == 422
 
 
-def test_bulk_private_delete(client, db, setup_store):
+def test_bulk_private_delete(client, qdrant_db, setup_store):
     mem = _make_memory(id="bulk_001")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     with patch("claude_memory_kit.api.app.do_forget", new_callable=AsyncMock) as mock_forget:
         mock_forget.return_value = "forgotten"
         resp = client.post("/api/private/bulk", json={
@@ -359,20 +369,23 @@ def test_bulk_private_delete(client, db, setup_store):
         assert "1/1" in resp.json()["result"]
 
 
-def test_bulk_private_redact(client, db, setup_store):
+def test_bulk_private_redact(client, qdrant_db, setup_store):
     mem = _make_memory(id="bulk_002")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     resp = client.post("/api/private/bulk", json={
         "ids": ["bulk_002"],
         "action": "redact",
     })
     assert resp.status_code == 200
     assert "1/1" in resp.json()["result"]
+    # Verify content was redacted in Qdrant
+    updated = qdrant_db.get_memory("bulk_002")
+    assert updated.content == "[REDACTED]"
 
 
-def test_bulk_private_reclassify(client, db, setup_store):
+def test_bulk_private_reclassify(client, qdrant_db, setup_store):
     mem = _make_memory(id="bulk_003")
-    db.insert_memory(mem)
+    qdrant_db.insert_memory(mem)
     resp = client.post("/api/private/bulk", json={
         "ids": ["bulk_003"],
         "action": "reclassify",
@@ -390,7 +403,7 @@ def test_bulk_private_invalid_action(client):
     assert resp.status_code == 422
 
 
-def test_bulk_private_nonexistent_ids(client, db):
+def test_bulk_private_nonexistent_ids(client, qdrant_db):
     resp = client.post("/api/private/bulk", json={
         "ids": ["ghost_001"],
         "action": "delete",
@@ -401,7 +414,7 @@ def test_bulk_private_nonexistent_ids(client, db):
 
 # ---- Stats ----
 
-def test_get_stats(client, db):
+def test_get_stats(client, qdrant_db):
     resp = client.get("/api/stats")
     assert resp.status_code == 200
     data = resp.json()
@@ -410,9 +423,9 @@ def test_get_stats(client, db):
     assert "has_identity" in data
 
 
-def test_get_stats_with_data(client, db):
-    db.insert_memory(_make_memory(id="stat_001", gate=Gate.behavioral))
-    db.insert_memory(_make_memory(id="stat_002", gate=Gate.epistemic))
+def test_get_stats_with_data(client, qdrant_db):
+    qdrant_db.insert_memory(_make_memory(id="stat_001", gate=Gate.behavioral))
+    qdrant_db.insert_memory(_make_memory(id="stat_002", gate=Gate.epistemic))
     resp = client.get("/api/stats")
     data = resp.json()
     assert data["total"] == 2
@@ -421,13 +434,13 @@ def test_get_stats_with_data(client, db):
 
 # ---- Rules ----
 
-def test_list_rules_empty(client, db):
+def test_list_rules_empty(client, qdrant_db):
     resp = client.get("/api/rules")
     assert resp.status_code == 200
     assert resp.json()["rules"] == []
 
 
-def test_create_rule(client, db):
+def test_create_rule(client, qdrant_db):
     resp = client.post("/api/rules", json={
         "condition": "always greet the user",
         "enforcement": "suggest",
@@ -444,7 +457,7 @@ def test_create_rule_bad_enforcement(client):
     assert resp.status_code == 422
 
 
-def test_update_rule(client, db):
+def test_update_rule(client, qdrant_db):
     # Create first
     create_resp = client.post("/api/rules", json={
         "condition": "original condition",
@@ -460,7 +473,7 @@ def test_update_rule(client, db):
     assert resp.json()["result"] == "updated"
 
 
-def test_update_rule_no_changes(client, db):
+def test_update_rule_no_changes(client, qdrant_db):
     create_resp = client.post("/api/rules", json={
         "condition": "test condition",
     })
@@ -477,7 +490,7 @@ def test_update_rule_not_found(client):
     assert resp.status_code == 404
 
 
-def test_delete_rule(client, db):
+def test_delete_rule(client, qdrant_db):
     create_resp = client.post("/api/rules", json={
         "condition": "to be deleted",
     })
@@ -593,11 +606,14 @@ def test_lifespan_runs(monkeypatch):
     from claude_memory_kit.api.app import lifespan
     import asyncio
 
-    async def _run():
-        async with lifespan(app):
-            pass  # just verify it enters and exits
+    mock_store = MagicMock()
+    with patch("claude_memory_kit.api.app.Store", return_value=mock_store), \
+         patch("claude_memory_kit.api.app.get_store_path", return_value="/tmp/test"):
+        async def _run():
+            async with lifespan(app):
+                assert app.state.store is mock_store
 
-    asyncio.run(_run())
+        asyncio.run(_run())
 
 
 def test_lifespan_auth_warning(monkeypatch):
@@ -608,11 +624,14 @@ def test_lifespan_auth_warning(monkeypatch):
     from claude_memory_kit.api.app import lifespan
     import asyncio
 
-    async def _run():
-        async with lifespan(app):
-            pass
+    mock_store = MagicMock()
+    with patch("claude_memory_kit.api.app.Store", return_value=mock_store), \
+         patch("claude_memory_kit.api.app.get_store_path", return_value="/tmp/test"):
+        async def _run():
+            async with lifespan(app):
+                pass
 
-    asyncio.run(_run())
+        asyncio.run(_run())
 
 
 def test_lifespan_auth_enabled(monkeypatch):
@@ -622,25 +641,24 @@ def test_lifespan_auth_enabled(monkeypatch):
     from claude_memory_kit.api.app import lifespan
     import asyncio
 
-    async def _run():
-        async with lifespan(app):
-            pass
-
-    asyncio.run(_run())
-
-
-# ---- _get_store lazy init ----
-
-def test_get_store_lazy_init(monkeypatch):
-    """_get_store creates store on first call."""
-    monkeypatch.setattr(app_module, "_store", None)
     mock_store = MagicMock()
     with patch("claude_memory_kit.api.app.Store", return_value=mock_store), \
          patch("claude_memory_kit.api.app.get_store_path", return_value="/tmp/test"):
-        result = _get_store()
+        async def _run():
+            async with lifespan(app):
+                pass
+
+        asyncio.run(_run())
+
+
+# ---- _get_store reads from app.state ----
+
+def test_get_store_returns_app_state():
+    """_get_store returns the store from app.state."""
+    mock_store = MagicMock()
+    app.state.store = mock_store
+    result = _get_store()
     assert result is mock_store
-    mock_store.db.migrate.assert_called_once()
-    mock_store.vectors.ensure_collection.assert_called_once()
 
 
 # ---- _auth dependency ----
@@ -649,9 +667,8 @@ def test_get_store_lazy_init(monkeypatch):
 async def test_auth_dependency_calls_get_current_user(monkeypatch, db):
     """_auth resolves user via get_current_user."""
     mock_store = MagicMock()
-    mock_store.db = db
-    monkeypatch.setattr(app_module, "_store", mock_store)
-    monkeypatch.setattr(app_module, "_get_store", lambda: mock_store)
+    mock_store.auth_db = db
+    app.state.store = mock_store
 
     from claude_memory_kit.api.app import _auth as real_auth
     mock_request = MagicMock()
@@ -660,19 +677,124 @@ async def test_auth_dependency_calls_get_current_user(monkeypatch, db):
     assert result == LOCAL_USER
 
 
-# ---- Redact vector failure ----
+# ---- Redact verifies content change ----
 
-def test_bulk_private_redact_vector_failure(client, db, setup_store):
-    """Redact continues even if vector upsert fails."""
-    mem = _make_memory(id="bulk_redact_fail")
-    db.insert_memory(mem)
-    setup_store.vectors.upsert.side_effect = RuntimeError("vector service down")
+def test_bulk_private_redact_verifies_content(client, qdrant_db, setup_store):
+    """Redact updates memory content to [REDACTED] in Qdrant."""
+    mem = _make_memory(id="bulk_redact_verify")
+    qdrant_db.insert_memory(mem)
     resp = client.post("/api/private/bulk", json={
-        "ids": ["bulk_redact_fail"],
+        "ids": ["bulk_redact_verify"],
         "action": "redact",
     })
     assert resp.status_code == 200
     assert "1/1" in resp.json()["result"]
-    # Memory content should still be redacted in SQLite
-    updated = db.get_memory("bulk_redact_fail")
+    # Memory content should be redacted in Qdrant
+    updated = qdrant_db.get_memory("bulk_redact_verify")
     assert updated.content == "[REDACTED]"
+
+
+# ---- Synthesize Proxy ----
+
+def test_synthesize_no_server_key(client, monkeypatch):
+    """Synthesize returns 503 when server has no ANTHROPIC_API_KEY."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    resp = client.post("/api/synthesize", json={
+        "system": "You are a test.",
+        "prompt": "Say hello.",
+    })
+    assert resp.status_code == 503
+    assert "unavailable" in resp.json()["detail"].lower()
+
+
+def test_synthesize_placeholder_key(client, monkeypatch):
+    """Synthesize returns 503 when key starts with <."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "<your-key-here>")
+    resp = client.post("/api/synthesize", json={
+        "system": "test",
+        "prompt": "test",
+    })
+    assert resp.status_code == 503
+
+
+def test_synthesize_success(client, monkeypatch):
+    """Synthesize proxies to Anthropic and returns text."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "content": [{"type": "text", "text": "Hello from Claude!"}],
+    }
+
+    with patch("claude_memory_kit.api.app.httpx.AsyncClient") as MockClient:
+        mock_client_instance = AsyncMock()
+        mock_client_instance.post.return_value = mock_response
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=None)
+        MockClient.return_value = mock_client_instance
+
+        resp = client.post("/api/synthesize", json={
+            "system": "You are a test assistant.",
+            "prompt": "Say hello.",
+            "max_tokens": 100,
+        })
+
+    assert resp.status_code == 200
+    assert resp.json()["text"] == "Hello from Claude!"
+
+
+def test_synthesize_upstream_error(client, monkeypatch):
+    """Synthesize returns 502 when Anthropic returns non-200."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+
+    mock_response = MagicMock()
+    mock_response.status_code = 429
+    mock_response.text = "Rate limited"
+
+    with patch("claude_memory_kit.api.app.httpx.AsyncClient") as MockClient:
+        mock_client_instance = AsyncMock()
+        mock_client_instance.post.return_value = mock_response
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=None)
+        MockClient.return_value = mock_client_instance
+
+        resp = client.post("/api/synthesize", json={
+            "system": "test",
+            "prompt": "test",
+        })
+
+    assert resp.status_code == 502
+    assert "429" in resp.json()["detail"]
+
+
+def test_synthesize_network_error(client, monkeypatch):
+    """Synthesize returns 502 on network failure."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+
+    with patch("claude_memory_kit.api.app.httpx.AsyncClient") as MockClient:
+        mock_client_instance = AsyncMock()
+        mock_client_instance.post.side_effect = httpx.ConnectError("connection refused")
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=None)
+        MockClient.return_value = mock_client_instance
+
+        resp = client.post("/api/synthesize", json={
+            "system": "test",
+            "prompt": "test",
+        })
+
+    assert resp.status_code == 502
+    assert "request failed" in resp.json()["detail"].lower()
+
+
+def test_synthesize_validation_error(client, monkeypatch):
+    """Synthesize rejects invalid input."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-key")
+    # max_tokens out of range
+    resp = client.post("/api/synthesize", json={
+        "system": "test",
+        "prompt": "test",
+        "max_tokens": 99999,
+    })
+    assert resp.status_code == 422

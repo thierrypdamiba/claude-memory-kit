@@ -26,9 +26,16 @@ def get_model() -> str:
 
 
 def get_api_key() -> str:
+    """Get API key for synthesis. Checks CMK cloud key first, then local Anthropic key."""
+    # Check for CMK cloud API key (no local Anthropic key needed)
+    from .cli_auth import get_api_key as get_cmk_key
+    cmk_key = get_cmk_key()
+    if cmk_key and cmk_key.startswith("cmk-sk-"):
+        return cmk_key
+
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if not key or key.startswith("<"):
-        log.warning("ANTHROPIC_API_KEY not set. synthesis disabled.")
+        log.debug("no synthesis key available (set CMK cloud key or ANTHROPIC_API_KEY)")
     return key
 
 

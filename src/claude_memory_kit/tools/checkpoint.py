@@ -33,22 +33,8 @@ async def do_checkpoint(
     """Save a session checkpoint to the journal."""
     entry = JournalEntry(
         timestamp=datetime.now(timezone.utc),
-        gate=Gate.epistemic,  # stored as 'checkpoint' gate in journal directly
+        gate=Gate.checkpoint,
         content=summary,
     )
-
-    # Write directly to journal with gate='checkpoint' (bypasses Gate enum)
-    store.db.conn.execute(
-        "INSERT INTO journal "
-        "(date, timestamp, gate, content, person, project, user_id) "
-        "VALUES (?, ?, 'checkpoint', ?, NULL, NULL, ?)",
-        (
-            entry.timestamp.strftime("%Y-%m-%d"),
-            entry.timestamp.isoformat(),
-            summary,
-            user_id,
-        ),
-    )
-    store.db.conn.commit()
-
+    store.qdrant.insert_journal(entry, user_id=user_id)
     return "Checkpoint saved. This will be loaded at the start of your next session."

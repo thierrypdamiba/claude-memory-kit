@@ -2,13 +2,13 @@ import logging
 from collections import defaultdict
 
 from ..extract import consolidate_entries
-from ..store.sqlite import SqliteStore
+from ..types import Gate
 
 log = logging.getLogger("cmk")
 
 
 async def consolidate_journals(
-    db: SqliteStore, api_key: str, user_id: str = "local"
+    db, api_key: str, user_id: str = "local"
 ) -> str | None:
     """Consolidate old journal entries into weekly digests."""
     stale_dates = db.stale_journal_dates(max_age_days=14, user_id=user_id)
@@ -38,13 +38,12 @@ async def consolidate_journals(
         digest = await consolidate_entries("\n".join(combined), api_key)
 
         # Store digest as a special journal entry
-        db.conn.execute(
-            "INSERT INTO journal "
-            "(date, timestamp, gate, content, person, project, user_id) "
-            "VALUES (?, datetime('now'), 'digest', ?, NULL, NULL, ?)",
-            (week_key, f"# Week {week_key}\n\n{digest}", user_id),
+        db.insert_journal_raw(
+            date=week_key,
+            gate=Gate.digest,
+            content=f"# Week {week_key}\n\n{digest}",
+            user_id=user_id,
         )
-        db.conn.commit()
 
         # Archive original entries
         for date in dates:

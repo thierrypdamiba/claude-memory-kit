@@ -10,6 +10,8 @@ class Gate(str, Enum):
     epistemic = "epistemic"
     promissory = "promissory"
     correction = "correction"
+    checkpoint = "checkpoint"  # journal-only: session snapshots
+    digest = "digest"          # journal-only: consolidated weekly digests
 
     @classmethod
     def from_str(cls, s: str) -> "Gate | None":
@@ -41,6 +43,8 @@ class DecayClass(str, Enum):
             Gate.epistemic: cls.moderate,
             Gate.behavioral: cls.fast,
             Gate.correction: cls.moderate,
+            Gate.checkpoint: cls.fast,
+            Gate.digest: cls.moderate,
         }[gate]
 
 

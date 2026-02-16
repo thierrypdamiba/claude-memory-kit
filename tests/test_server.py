@@ -370,40 +370,40 @@ class TestExtractPersonProject:
 class TestBuildInstructions:
     """Tests for dynamic instruction builder."""
 
-    def _make_store(self, db):
-        """Create a minimal Store-like object backed by a real SqliteStore."""
+    def _make_store(self, qdrant_db):
+        """Create a minimal Store-like object backed by a real QdrantStore."""
         store = MagicMock()
-        store.db = db
+        store.qdrant = qdrant_db
         return store
 
-    def test_base_instructions_always_present(self, db):
-        store = self._make_store(db)
+    def test_base_instructions_always_present(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         instructions = _build_instructions(store, "test-user")
         assert "Claude Memory Kit" in instructions
-        assert "4 tools: save, search, forget, checkpoint." in instructions
+        assert "4 tools: remember_this, recall_memories, forget_memory, save_checkpoint." in instructions
 
-    def test_includes_identity_card(self, db):
-        store = self._make_store(db)
+    def test_includes_identity_card(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         card = IdentityCard(
             person="Thierry",
             project="claude-memory",
             content="I work with Thierry. He builds memory tools.",
             last_updated=datetime.now(timezone.utc),
         )
-        db.set_identity(card, user_id="test-user")
+        qdrant_db.set_identity(card, user_id="test-user")
 
         instructions = _build_instructions(store, "test-user")
         assert "Who I am" in instructions
         assert "Thierry" in instructions
         assert "memory tools" in instructions
 
-    def test_no_identity_section_when_missing(self, db):
-        store = self._make_store(db)
+    def test_no_identity_section_when_missing(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         instructions = _build_instructions(store, "test-user")
         assert "Who I am" not in instructions
 
-    def test_includes_recent_journal(self, db):
-        store = self._make_store(db)
+    def test_includes_recent_journal(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         entry = JournalEntry(
             timestamp=datetime.now(timezone.utc),
             gate=Gate.epistemic,
@@ -411,26 +411,26 @@ class TestBuildInstructions:
             person=None,
             project=None,
         )
-        db.insert_journal(entry, user_id="test-user")
+        qdrant_db.insert_journal(entry, user_id="test-user")
 
         instructions = _build_instructions(store, "test-user")
         assert "Recent context" in instructions
         assert "HNSW" in instructions
 
-    def test_no_recent_section_when_empty(self, db):
-        store = self._make_store(db)
+    def test_no_recent_section_when_empty(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         instructions = _build_instructions(store, "test-user")
         assert "Recent context" not in instructions
 
-    def test_journal_entries_capped_at_8(self, db):
-        store = self._make_store(db)
+    def test_journal_entries_capped_at_8(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         for i in range(15):
             entry = JournalEntry(
                 timestamp=datetime.now(timezone.utc),
                 gate=Gate.epistemic,
                 content=f"Entry number {i}",
             )
-            db.insert_journal(entry, user_id="test-user")
+            qdrant_db.insert_journal(entry, user_id="test-user")
 
         instructions = _build_instructions(store, "test-user")
         # Should have at most 8 journal lines in the output
@@ -440,50 +440,46 @@ class TestBuildInstructions:
         ]
         assert len(journal_lines) <= 8
 
-    def test_instructions_include_proactive_saving_rules(self, db):
-        store = self._make_store(db)
+    def test_instructions_include_proactive_saving_rules(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         instructions = _build_instructions(store, "test-user")
         assert "PROACTIVE SAVING" in instructions
         assert "Do NOT save" in instructions
 
-    def test_includes_checkpoint_when_present(self, db):
-        store = self._make_store(db)
-        # Insert a checkpoint directly into journal
-        db.conn.execute(
-            "INSERT INTO journal "
-            "(date, timestamp, gate, content, person, project, user_id) "
-            "VALUES (?, ?, 'checkpoint', ?, NULL, NULL, ?)",
-            ("2026-02-15", "2026-02-15T12:00:00+00:00",
-             "Working on checkpoint tests. Next: coverage.", "test-user"),
+    def test_includes_checkpoint_when_present(self, qdrant_db):
+        store = self._make_store(qdrant_db)
+        # Insert a checkpoint via insert_journal_raw
+        qdrant_db.insert_journal_raw(
+            date="2026-02-15",
+            gate=Gate.checkpoint,
+            content="Working on checkpoint tests. Next: coverage.",
+            user_id="test-user",
         )
-        db.conn.commit()
 
         instructions = _build_instructions(store, "test-user")
         assert "Last session checkpoint" in instructions
         assert "Working on checkpoint tests" in instructions
 
-    def test_no_checkpoint_section_when_missing(self, db):
-        store = self._make_store(db)
+    def test_no_checkpoint_section_when_missing(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         instructions = _build_instructions(store, "test-user")
         assert "Last session checkpoint" not in instructions
 
-    def test_checkpoints_excluded_from_recent_context(self, db):
-        store = self._make_store(db)
+    def test_checkpoints_excluded_from_recent_context(self, qdrant_db):
+        store = self._make_store(qdrant_db)
         # Insert a normal journal entry and a checkpoint
         entry = JournalEntry(
             timestamp=datetime.now(timezone.utc),
             gate=Gate.epistemic,
             content="Regular journal entry",
         )
-        db.insert_journal(entry, user_id="test-user")
-        db.conn.execute(
-            "INSERT INTO journal "
-            "(date, timestamp, gate, content, person, project, user_id) "
-            "VALUES (?, ?, 'checkpoint', ?, NULL, NULL, ?)",
-            ("2026-02-15", "2026-02-15T12:00:00+00:00",
-             "Checkpoint content here", "test-user"),
+        qdrant_db.insert_journal(entry, user_id="test-user")
+        qdrant_db.insert_journal_raw(
+            date="2026-02-15",
+            gate=Gate.checkpoint,
+            content="Checkpoint content here",
+            user_id="test-user",
         )
-        db.conn.commit()
 
         instructions = _build_instructions(store, "test-user")
         assert "Regular journal entry" in instructions
@@ -510,45 +506,56 @@ class TestToolDefs:
 
     def test_tool_names(self):
         names = {t.name for t in TOOL_DEFS}
-        assert names == {"save", "search", "forget", "checkpoint"}
+        assert names == {"remember_this", "recall_memories", "forget_memory", "save_checkpoint"}
 
-    def test_save_tool_requires_text(self):
-        save_tool = next(t for t in TOOL_DEFS if t.name == "save")
-        assert "text" in save_tool.inputSchema["required"]
+    def test_remember_this_requires_text(self):
+        tool = next(t for t in TOOL_DEFS if t.name == "remember_this")
+        assert "text" in tool.inputSchema["required"]
 
-    def test_search_tool_requires_query(self):
-        search_tool = next(t for t in TOOL_DEFS if t.name == "search")
-        assert "query" in search_tool.inputSchema["required"]
+    def test_recall_memories_requires_query(self):
+        tool = next(t for t in TOOL_DEFS if t.name == "recall_memories")
+        assert "query" in tool.inputSchema["required"]
 
-    def test_forget_tool_requires_id_and_reason(self):
-        forget_tool = next(t for t in TOOL_DEFS if t.name == "forget")
-        assert "id" in forget_tool.inputSchema["required"]
-        assert "reason" in forget_tool.inputSchema["required"]
+    def test_forget_memory_requires_id_and_reason(self):
+        tool = next(t for t in TOOL_DEFS if t.name == "forget_memory")
+        assert "id" in tool.inputSchema["required"]
+        assert "reason" in tool.inputSchema["required"]
 
-    def test_save_has_optional_person_project(self):
-        save_tool = next(t for t in TOOL_DEFS if t.name == "save")
-        props = save_tool.inputSchema["properties"]
+    def test_remember_this_has_optional_person_project(self):
+        tool = next(t for t in TOOL_DEFS if t.name == "remember_this")
+        props = tool.inputSchema["properties"]
         assert "person" in props
         assert "project" in props
-        # Not required
-        assert "person" not in save_tool.inputSchema["required"]
-        assert "project" not in save_tool.inputSchema["required"]
+        assert "person" not in tool.inputSchema["required"]
+        assert "project" not in tool.inputSchema["required"]
 
 
 class TestLegacyAliases:
     """Tests for legacy tool name mappings."""
 
-    def test_remember_maps_to_save(self):
-        assert LEGACY_ALIASES["remember"] == "save"
+    def test_save_maps_to_remember_this(self):
+        assert LEGACY_ALIASES["save"] == "remember_this"
 
-    def test_recall_maps_to_search(self):
-        assert LEGACY_ALIASES["recall"] == "search"
+    def test_remember_maps_to_remember_this(self):
+        assert LEGACY_ALIASES["remember"] == "remember_this"
 
-    def test_prime_maps_to_search(self):
-        assert LEGACY_ALIASES["prime"] == "search"
+    def test_search_maps_to_recall_memories(self):
+        assert LEGACY_ALIASES["search"] == "recall_memories"
 
-    def test_exactly_three_aliases(self):
-        assert len(LEGACY_ALIASES) == 3
+    def test_recall_maps_to_recall_memories(self):
+        assert LEGACY_ALIASES["recall"] == "recall_memories"
+
+    def test_prime_maps_to_recall_memories(self):
+        assert LEGACY_ALIASES["prime"] == "recall_memories"
+
+    def test_forget_maps_to_forget_memory(self):
+        assert LEGACY_ALIASES["forget"] == "forget_memory"
+
+    def test_checkpoint_maps_to_save_checkpoint(self):
+        assert LEGACY_ALIASES["checkpoint"] == "save_checkpoint"
+
+    def test_correct_alias_count(self):
+        assert len(LEGACY_ALIASES) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -561,155 +568,152 @@ class TestDispatch:
     @pytest.fixture
     def mock_store(self):
         store = MagicMock()
-        store.db = MagicMock()
-        store.vectors = MagicMock()
+        store.qdrant = MagicMock()
         return store
 
+    @pytest.fixture
+    def counters(self):
+        return {"save": 0, "checkpoint": 0}
+
     @pytest.mark.asyncio
-    async def test_save_calls_do_remember(self, mock_store):
+    async def test_remember_this_calls_do_remember(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="Remembered [epistemic]: test (id: mem_001)",
         ) as mock_remember:
             result = await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Python uses indentation for blocks"},
-                "user1",
+                "user1", counters,
             )
             mock_remember.assert_awaited_once()
             assert "Remembered" in result
 
     @pytest.mark.asyncio
-    async def test_save_auto_gates_promissory(self, mock_store):
+    async def test_remember_this_auto_gates_promissory(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "I will finish the feature by Friday"},
-                "user1",
+                "user1", counters,
             )
-            # gate arg should be "promissory"
             call_args = mock_remember.call_args
-            assert call_args[0][2] == "promissory"  # positional: gate
+            assert call_args[0][2] == "promissory"
 
     @pytest.mark.asyncio
-    async def test_save_auto_gates_correction(self, mock_store):
+    async def test_remember_this_auto_gates_correction(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Actually the service uses gRPC"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
             assert call_args[0][2] == "correction"
 
     @pytest.mark.asyncio
-    async def test_save_auto_gates_behavioral(self, mock_store):
+    async def test_remember_this_auto_gates_behavioral(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "From now on use pytest for all tests"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
             assert call_args[0][2] == "behavioral"
 
     @pytest.mark.asyncio
-    async def test_save_auto_detects_person(self, mock_store):
+    async def test_remember_this_auto_detects_person(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Got feedback from Alice on the design"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
-            assert call_args[0][3] == "Alice"  # positional: person
+            assert call_args[0][3] == "Alice"
 
     @pytest.mark.asyncio
-    async def test_save_auto_detects_project(self, mock_store):
+    async def test_remember_this_auto_detects_project(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Deployed project acme-api to staging"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
-            assert call_args[0][4] == "acme-api"  # positional: project
+            assert call_args[0][4] == "acme-api"
 
     @pytest.mark.asyncio
-    async def test_save_explicit_person_overrides_auto(self, mock_store):
+    async def test_remember_this_explicit_person_overrides_auto(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Got feedback from Alice", "person": "Bob"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
             assert call_args[0][3] == "Bob"
 
     @pytest.mark.asyncio
-    async def test_save_explicit_project_overrides_auto(self, mock_store):
+    async def test_remember_this_explicit_project_overrides_auto(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Working on project foo", "project": "bar"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
             assert call_args[0][4] == "bar"
 
     @pytest.mark.asyncio
-    async def test_save_increments_save_count(self, mock_store):
-        import claude_memory_kit.server as server_mod
-
-        original = server_mod._save_count
+    async def test_remember_this_increments_save_count(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ):
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "some fact"},
-                "user1",
+                "user1", counters,
             )
-            assert server_mod._save_count == original + 1
-        # Reset to avoid polluting other tests
-        server_mod._save_count = original
+            assert counters["save"] == 1
 
     @pytest.mark.asyncio
-    async def test_save_triggers_auto_reflect_at_threshold(self, mock_store):
+    async def test_remember_this_triggers_auto_reflect_at_threshold(self, mock_store, counters):
         import claude_memory_kit.server as server_mod
 
-        server_mod._save_count = server_mod._REFLECT_EVERY - 1
+        counters["save"] = server_mod._REFLECT_EVERY - 1
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
@@ -720,19 +724,18 @@ class TestDispatch:
             return_value="reflected",
         ) as mock_reflect:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "trigger reflect"},
-                "user1",
+                "user1", counters,
             )
             mock_reflect.assert_awaited_once()
-            # save_count should reset to 0
-            assert server_mod._save_count == 0
+            assert counters["save"] == 0
 
     @pytest.mark.asyncio
-    async def test_save_auto_reflect_failure_does_not_crash(self, mock_store):
+    async def test_remember_this_auto_reflect_failure_does_not_crash(self, mock_store, counters):
         import claude_memory_kit.server as server_mod
 
-        server_mod._save_count = server_mod._REFLECT_EVERY - 1
+        counters["save"] = server_mod._REFLECT_EVERY - 1
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
@@ -742,26 +745,42 @@ class TestDispatch:
             new_callable=AsyncMock,
             side_effect=RuntimeError("reflect boom"),
         ):
-            # Should not raise
             result = await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "trigger reflect that fails"},
-                "user1",
+                "user1", counters,
             )
             assert result == "ok"
-            assert server_mod._save_count == 0
+            assert counters["save"] == 0
 
     @pytest.mark.asyncio
-    async def test_search_calls_do_recall(self, mock_store):
+    async def test_remember_this_triggers_auto_checkpoint_at_threshold(self, mock_store, counters):
+        from claude_memory_kit.tools.checkpoint import CHECKPOINT_EVERY
+        counters["checkpoint"] = CHECKPOINT_EVERY - 1
+        with patch(
+            "claude_memory_kit.server.do_remember",
+            new_callable=AsyncMock,
+            return_value="ok",
+        ):
+            result = await _dispatch(
+                mock_store, "remember_this",
+                {"text": "trigger checkpoint"},
+                "user1", counters,
+            )
+            assert "[auto-checkpoint]" in result
+            assert counters["checkpoint"] == 0
+
+    @pytest.mark.asyncio
+    async def test_recall_memories_calls_do_recall(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_recall",
             new_callable=AsyncMock,
             return_value="Found 2 memories:\n...",
         ) as mock_recall:
             result = await _dispatch(
-                mock_store, "search",
+                mock_store, "recall_memories",
                 {"query": "python best practices"},
-                "user1",
+                "user1", counters,
             )
             mock_recall.assert_awaited_once_with(
                 mock_store, "python best practices", user_id="user1",
@@ -769,16 +788,16 @@ class TestDispatch:
             assert "Found" in result
 
     @pytest.mark.asyncio
-    async def test_forget_calls_do_forget(self, mock_store):
+    async def test_forget_memory_calls_do_forget(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_forget",
             new_callable=AsyncMock,
-            return_value="Forgotten: mem_001 (reason: outdated). Archived for accountability.",
+            return_value="Forgotten: mem_001 (reason: outdated).",
         ) as mock_forget:
             result = await _dispatch(
-                mock_store, "forget",
+                mock_store, "forget_memory",
                 {"id": "mem_001", "reason": "outdated"},
-                "user1",
+                "user1", counters,
             )
             mock_forget.assert_awaited_once_with(
                 mock_store, "mem_001", "outdated", user_id="user1",
@@ -786,7 +805,7 @@ class TestDispatch:
             assert "Forgotten" in result
 
     @pytest.mark.asyncio
-    async def test_legacy_identity_dispatch(self, mock_store):
+    async def test_legacy_identity_dispatch(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_identity",
             new_callable=AsyncMock,
@@ -795,7 +814,7 @@ class TestDispatch:
             result = await _dispatch(
                 mock_store, "identity",
                 {"onboard_response": "Thierry"},
-                "user1",
+                "user1", counters,
             )
             mock_id.assert_awaited_once_with(
                 mock_store, "Thierry", user_id="user1",
@@ -803,7 +822,7 @@ class TestDispatch:
             assert "Identity" in result
 
     @pytest.mark.asyncio
-    async def test_legacy_identity_with_none_response(self, mock_store):
+    async def test_legacy_identity_with_none_response(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_identity",
             new_callable=AsyncMock,
@@ -812,14 +831,14 @@ class TestDispatch:
             result = await _dispatch(
                 mock_store, "identity",
                 {},
-                "user1",
+                "user1", counters,
             )
             mock_id.assert_awaited_once_with(
                 mock_store, None, user_id="user1",
             )
 
     @pytest.mark.asyncio
-    async def test_legacy_reflect_dispatch(self, mock_store):
+    async def test_legacy_reflect_dispatch(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_reflect",
             new_callable=AsyncMock,
@@ -828,7 +847,7 @@ class TestDispatch:
             result = await _dispatch(
                 mock_store, "reflect",
                 {},
-                "user1",
+                "user1", counters,
             )
             mock_reflect.assert_awaited_once_with(
                 mock_store, user_id="user1",
@@ -836,7 +855,7 @@ class TestDispatch:
             assert "Reflection" in result
 
     @pytest.mark.asyncio
-    async def test_legacy_auto_extract_dispatch(self, mock_store):
+    async def test_legacy_auto_extract_dispatch(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_auto_extract",
             new_callable=AsyncMock,
@@ -845,7 +864,7 @@ class TestDispatch:
             result = await _dispatch(
                 mock_store, "auto_extract",
                 {"transcript": "User said they prefer dark mode."},
-                "user1",
+                "user1", counters,
             )
             mock_extract.assert_awaited_once_with(
                 mock_store, "User said they prefer dark mode.", user_id="user1",
@@ -853,16 +872,16 @@ class TestDispatch:
             assert "extracted" in result
 
     @pytest.mark.asyncio
-    async def test_checkpoint_calls_do_checkpoint(self, mock_store):
+    async def test_save_checkpoint_calls_do_checkpoint(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_checkpoint",
             new_callable=AsyncMock,
             return_value="Checkpoint saved. This will be loaded at the start of your next session.",
         ) as mock_ckpt:
             result = await _dispatch(
-                mock_store, "checkpoint",
+                mock_store, "save_checkpoint",
                 {"summary": "Working on tests. Decided to use pytest."},
-                "user1",
+                "user1", counters,
             )
             mock_ckpt.assert_awaited_once_with(
                 mock_store, "Working on tests. Decided to use pytest.", user_id="user1",
@@ -870,25 +889,25 @@ class TestDispatch:
             assert "Checkpoint saved" in result
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_returns_error(self, mock_store):
+    async def test_unknown_tool_returns_error(self, mock_store, counters):
         result = await _dispatch(
             mock_store, "nonexistent_tool",
             {},
-            "user1",
+            "user1", counters,
         )
         assert result == "Unknown tool: nonexistent_tool"
 
     @pytest.mark.asyncio
-    async def test_unknown_tool_with_args_returns_error(self, mock_store):
+    async def test_unknown_tool_with_args_returns_error(self, mock_store, counters):
         result = await _dispatch(
             mock_store, "foobar",
             {"x": 1, "y": 2},
-            "user1",
+            "user1", counters,
         )
         assert "Unknown tool: foobar" in result
 
     @pytest.mark.asyncio
-    async def test_save_with_no_person_no_project_auto_extracts(self, mock_store):
+    async def test_remember_this_auto_extracts_person_project(self, mock_store, counters):
         """When neither person nor project is given, auto-extraction runs."""
         with patch(
             "claude_memory_kit.server.do_remember",
@@ -896,25 +915,25 @@ class TestDispatch:
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "Working with Eve on project zeta"},
-                "user1",
+                "user1", counters,
             )
             call_args = mock_remember.call_args
-            assert call_args[0][3] == "Eve"    # auto-detected person
-            assert call_args[0][4] == "zeta"   # auto-detected project
+            assert call_args[0][3] == "Eve"
+            assert call_args[0][4] == "zeta"
 
     @pytest.mark.asyncio
-    async def test_save_passes_user_id(self, mock_store):
+    async def test_remember_this_passes_user_id(self, mock_store, counters):
         with patch(
             "claude_memory_kit.server.do_remember",
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_remember:
             await _dispatch(
-                mock_store, "save",
+                mock_store, "remember_this",
                 {"text": "a fact"},
-                "user42",
+                "user42", counters,
             )
             call_kwargs = mock_remember.call_args[1]
             assert call_kwargs["user_id"] == "user42"
@@ -928,11 +947,11 @@ class TestCreateServer:
     """Tests for the create_server factory."""
 
     def _mock_store_instance(self):
-        """Create a MagicMock Store whose db methods return sane defaults."""
+        """Create a MagicMock Store whose qdrant methods return sane defaults."""
         mock_store_inst = MagicMock()
-        mock_store_inst.db.get_identity.return_value = None
-        mock_store_inst.db.recent_journal.return_value = []
-        mock_store_inst.db.latest_checkpoint.return_value = None
+        mock_store_inst.qdrant.get_identity.return_value = None
+        mock_store_inst.qdrant.recent_journal.return_value = []
+        mock_store_inst.qdrant.latest_checkpoint.return_value = None
         return mock_store_inst
 
     @patch("claude_memory_kit.server.get_user_id", return_value="test-user")
@@ -956,8 +975,8 @@ class TestCreateServer:
 
         create_server()
 
-        mock_store_inst.db.migrate.assert_called_once()
-        mock_store_inst.vectors.ensure_collection.assert_called_once()
+        mock_store_inst.auth_db.migrate.assert_called_once()
+        mock_store_inst.qdrant.ensure_collection.assert_called_once()
 
     @patch("claude_memory_kit.server.get_user_id", return_value="test-user")
     @patch("claude_memory_kit.server.get_store_path")

@@ -10,7 +10,7 @@ async def do_prime(
 ) -> str:
     """Proactive recall. Hybrid search (dense + sparse, RRF) top 3."""
     try:
-        results = store.vectors.search(message, limit=3, user_id=user_id)
+        results = store.qdrant.search(message, limit=3, user_id=user_id)
     except Exception as e:
         log.warning("prime hybrid search failed: %s", e)
         return "No relevant memories found."
@@ -22,9 +22,9 @@ async def do_prime(
     for mem_id, score in results:
         if score < 0.3:
             continue
-        full = store.db.get_memory(mem_id, user_id=user_id)
+        full = store.qdrant.get_memory(mem_id, user_id=user_id)
         if full:
-            store.db.touch_memory(mem_id, user_id=user_id)
+            store.qdrant.touch_memory(mem_id, user_id=user_id)
             lines.append(
                 f"[{full.gate.value}, relevance={score:.2f}] {full.content}"
             )

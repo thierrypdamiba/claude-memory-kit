@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 
 import httpx
 
@@ -7,7 +8,8 @@ from .config import get_model
 
 log = logging.getLogger("cmk")
 
-API_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
+CMK_CLOUD_URL = os.getenv("CMK_API_URL", "https://cmk.dev")
 
 EXTRACTION_PROMPT = """You are Claude's memory system. Read this conversation transcript and extract any memories worth keeping. Each memory must pass at least one write gate:
 - Behavioral: will change how Claude acts next time
@@ -30,16 +32,44 @@ Write the digest as prose, not bullet points."""
 IDENTITY_PROMPT = """Rewrite Claude's identity card based on these memories. ~200 tokens. First person. Capture: who this person is now, how to communicate with them, what's active, any open commitments. This should feel like waking up and immediately knowing who you are."""
 
 
-async def _call_anthropic(
+async def _call_cloud_proxy(
     system: str,
     user: str,
     api_key: str,
     max_tokens: int = 4096,
 ) -> str:
+    """Route synthesis through cmk.dev cloud proxy."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{CMK_CLOUD_URL}/api/v1/synthesize",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "content-type": "application/json",
+            },
+            json={
+                "system": system,
+                "prompt": user,
+                "max_tokens": max_tokens,
+            },
+        )
+        if resp.status_code != 200:
+            log.error("cloud proxy failed (%d): %s", resp.status_code, resp.text)
+            raise RuntimeError(f"cloud proxy failed ({resp.status_code})")
+        data = resp.json()
+        return data["text"]
+
+
+async def _call_anthropic_direct(
+    system: str,
+    user: str,
+    api_key: str,
+    max_tokens: int = 4096,
+) -> str:
+    """Call Anthropic API directly with a local API key."""
     model = get_model()
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(
-            API_URL,
+            ANTHROPIC_API_URL,
             headers={
                 "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
@@ -57,6 +87,18 @@ async def _call_anthropic(
             raise RuntimeError(f"anthropic api failed ({resp.status_code})")
         data = resp.json()
         return data["content"][0]["text"]
+
+
+async def _call_anthropic(
+    system: str,
+    user: str,
+    api_key: str,
+    max_tokens: int = 4096,
+) -> str:
+    """Route to cloud proxy or direct Anthropic based on the key type."""
+    if api_key.startswith("cmk-sk-"):
+        return await _call_cloud_proxy(system, user, api_key, max_tokens)
+    return await _call_anthropic_direct(system, user, api_key, max_tokens)
 
 
 async def extract_memories(

@@ -3,6 +3,7 @@
 import os
 import time
 import logging
+import threading
 from typing import Annotated
 
 import httpx
@@ -17,6 +18,7 @@ log = logging.getLogger("cmk")
 _jwk_client: PyJWKClient | None = None
 _jwk_cache_time: float = 0
 _JWK_CACHE_TTL = 3600  # 1 hour
+_jwk_lock = threading.Lock()
 
 
 def _get_clerk_config() -> dict:
@@ -69,13 +71,17 @@ def _get_jwk_client() -> PyJWKClient | None:
     if not url:
         return None
 
-    try:
-        _jwk_client = PyJWKClient(url, cache_keys=True)
-        _jwk_cache_time = now
-        return _jwk_client
-    except Exception as e:
-        log.warning("failed to fetch JWKS: %s", e)
-        return None
+    with _jwk_lock:
+        # Double-check after acquiring lock
+        if _jwk_client and (time.time() - _jwk_cache_time) < _JWK_CACHE_TTL:
+            return _jwk_client
+        try:
+            _jwk_client = PyJWKClient(url, cache_keys=True)
+            _jwk_cache_time = time.time()
+            return _jwk_client
+        except Exception as e:
+            log.warning("failed to fetch JWKS: %s", e)
+            return None
 
 
 def verify_clerk_token(token: str) -> dict | None:

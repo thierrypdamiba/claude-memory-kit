@@ -350,8 +350,10 @@ class TestCloudCollectionManagement:
         assert vectors_config["dense"].size == 1024  # JINA_DIM
         # Cloud mode adds hnsw_config
         assert "hnsw_config" in call_kwargs.kwargs
-        # Cloud mode creates content text index + user_id tenant index
-        assert store.client.create_payload_index.call_count == 2
+        # Cloud mode creates content text index + keyword indexes + user_id tenant index
+        # 1 text (content) + 8 keyword (type, gate, sensitivity, person, project,
+        # memory_id, date, rule_id) + 1 tenant (user_id) = 10
+        assert store.client.create_payload_index.call_count == 10
 
     def test_create_hybrid_collection_local_uses_local_dim(self):
         store = self._make_cloud_store()
@@ -362,8 +364,9 @@ class TestCloudCollectionManagement:
         vectors_config = call_kwargs.kwargs["vectors_config"]
         assert vectors_config["dense"].size == 384  # LOCAL_DIM
         assert "hnsw_config" not in call_kwargs.kwargs
-        # Local mode creates content text index only (no user_id tenant index)
-        store.client.create_payload_index.assert_called_once()
+        # Local mode creates content text index + keyword indexes (no user_id tenant)
+        # 1 text (content) + 8 keyword = 9
+        assert store.client.create_payload_index.call_count == 9
 
     def test_ensure_collection_triggers_migration_for_legacy(self):
         store = self._make_cloud_store()
@@ -571,8 +574,11 @@ class TestCloudUpsertAndSearch:
 
         assert results == []
         call_kwargs = store.client.query_points.call_args.kwargs
-        # No user_id filter
-        assert call_kwargs["prefetch"][0].filter is None
+        # Filter has type=memory but no user_id
+        pf_filter = call_kwargs["prefetch"][0].filter
+        assert pf_filter is not None
+        assert len(pf_filter.must) == 1
+        assert pf_filter.must[0].key == "type"
 
 
 class TestSearchText:
@@ -601,8 +607,8 @@ class TestSearchText:
         assert results == [("mem_1", 1.0), ("mem_2", 1.0)]
         call_kwargs = store.client.scroll.call_args.kwargs
         scroll_filter = call_kwargs["scroll_filter"]
-        # Should have user_id + content MatchText conditions
-        assert len(scroll_filter.must) == 2
+        # Should have type + content MatchText + user_id conditions
+        assert len(scroll_filter.must) == 3
 
     def test_without_user_id(self):
         store = self._make_store()
@@ -613,8 +619,8 @@ class TestSearchText:
         assert results == []
         call_kwargs = store.client.scroll.call_args.kwargs
         scroll_filter = call_kwargs["scroll_filter"]
-        # Only content MatchText condition, no user_id
-        assert len(scroll_filter.must) == 1
+        # type + content MatchText conditions, no user_id
+        assert len(scroll_filter.must) == 2
 
     def test_disabled_returns_empty(self):
         store = self._make_store()

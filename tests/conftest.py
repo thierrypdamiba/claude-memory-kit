@@ -23,11 +23,38 @@ def tmp_store_path(tmp_path):
 
 @pytest.fixture
 def db(tmp_store_path):
-    """Return a fresh migrated SqliteStore."""
+    """Return a fresh migrated SqliteStore (for auth tests)."""
     from claude_memory_kit.store.sqlite import SqliteStore
     store = SqliteStore(tmp_store_path)
     store.migrate()
     return store
+
+
+@pytest.fixture
+def qdrant_db():
+    """Return a fresh in-memory QdrantStore with fake embeddings."""
+    from qdrant_client import QdrantClient
+    from qdrant_client.models import SparseVector
+    from claude_memory_kit.store.qdrant_store import QdrantStore
+
+    qs = QdrantStore.__new__(QdrantStore)
+    qs.client = QdrantClient(":memory:")
+    qs._cloud = False
+    qs._disabled = False
+    qs._jina_key = ""
+    qs._fastembed_dense = None
+    qs._fastembed_sparse = None
+    qs._create_hybrid_collection()
+
+    # Fake vector generator (no real embeddings in tests)
+    def _fake_vector(content, *, query=False):
+        return {
+            "dense": [0.0] * 384,
+            "sparse": SparseVector(indices=[0], values=[1.0]),
+        }
+    qs._make_vector = _fake_vector
+
+    return qs
 
 
 @pytest.fixture
