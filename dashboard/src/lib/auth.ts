@@ -7,6 +7,9 @@ export const auth = betterAuth({
     connectionString: process.env.DATABASE_URL,
   }),
   plugins: [jwt()],
+  emailAndPassword: {
+    enabled: true,
+  },
   socialProviders: {
     github: {
       clientId: process.env.GITHUB_CLIENT_ID!,
