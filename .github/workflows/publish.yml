@@ -1,11 +1,14 @@
 name: publish
 
 on:
-  push:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
     branches: [main]
 
 jobs:
   check-version:
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.check.outputs.changed }}
@@ -28,39 +31,9 @@ jobs:
             echo "changed=false" >> $GITHUB_OUTPUT
           fi
 
-  test:
+  publish-test:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - name: set up python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
-
-      - name: install dependencies
-        run: uv sync --dev
-
-      - name: run tests
-        run: |
-          uv run pytest tests/ \
-            --cov=claude_memory_kit \
-            --cov-report=term-missing \
-            --cov-fail-under=90 \
-            -x -v \
-            -m "not slow"
-
-  publish-test:
-    needs: [check-version, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,7 +58,7 @@ jobs:
       - name: install from test pypi and smoke test
         run: |
           VERSION=${{ needs.check-version.outputs.version }}
-          uv pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "claude-memory-kit==$VERSION"
+          uv pip install --system --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ "claude-memory-kit==$VERSION"
           python -c "
           from claude_memory_kit import __version__
           from claude_memory_kit.store.qdrant_store import QdrantStore
