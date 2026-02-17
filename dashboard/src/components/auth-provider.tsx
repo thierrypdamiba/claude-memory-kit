@@ -8,8 +8,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setTokenProvider(async () => {
       try {
-        const session = await authClient.getSession();
-        return session?.data?.session?.token ?? null;
+        const res = await authClient.$fetch("/token", { method: "GET" });
+        const data = res.data as { token?: string } | null;
+        return data?.token ?? null;
       } catch {
         return null;
       }
